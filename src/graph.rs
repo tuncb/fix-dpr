@@ -12,6 +12,7 @@ pub struct UnitId(pub usize);
 #[derive(Debug)]
 pub struct UnitGraph {
     pub units: Vec<UnitInfo>,
+    #[allow(dead_code)]
     pub deps: Vec<Vec<UnitId>>,
     pub rev: Vec<Vec<UnitId>>,
     pub name_to_id: HashMap<String, UnitId>,

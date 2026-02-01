@@ -2,6 +2,7 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::process;
 
+mod dpr_edit;
 mod fs_walk;
 mod graph;
 mod pas_index;
@@ -66,20 +67,34 @@ fn main() {
         }
     };
     let dependents = graph::compute_dependents(&graph, new_unit_id);
-    let _ = (
-        scan.pas_files.len(),
-        scan.dpr_files.len(),
-        index.units.len(),
-        index.ambiguous.len(),
-        index.warnings.len(),
-        graph.units.len(),
-        graph.deps.len(),
-        graph.rev.len(),
-        graph.warnings.len(),
-        dependents.len(),
-    );
-    let _ = index.units.values().next().map(|info| info.name.len());
-    let _ = graph.units.get(new_unit_id.0).map(|info| info.name.len());
+    let dpr_summary =
+        match dpr_edit::update_dpr_files(&scan.dpr_files, &graph, new_unit_id, &dependents) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(1);
+            }
+        };
+
+    let mut warnings = Vec::new();
+    warnings.extend(index.warnings.iter().cloned());
+    warnings.extend(graph.warnings.iter().cloned());
+    warnings.extend(dpr_summary.warnings.iter().cloned());
+
+    println!("Summary:");
+    println!("  pas scanned: {}", scan.pas_files.len());
+    println!("  dpr scanned: {}", dpr_summary.scanned);
+    println!("  dpr updated: {}", dpr_summary.updated);
+    if !warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &warnings {
+            println!("  {warning}");
+        }
+    }
+
+    if dpr_summary.failures > 0 {
+        process::exit(1);
+    }
 }
 
 fn validate_args(cli: &Cli) -> Result<(), String> {
