@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 mod fs_walk;
+mod graph;
+mod pas_index;
+mod pas_lex;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,7 +44,42 @@ fn main() {
             process::exit(1);
         }
     };
-    let _ = (scan.pas_files.len(), scan.dpr_files.len());
+    let index = match pas_index::build_unit_index(&scan.pas_files) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let graph = match graph::build_unit_graph(&index) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let new_unit_id = match graph::resolve_new_unit_id(&cli.new_dependency, &graph, &search_root) {
+        Ok(id) => id,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let dependents = graph::compute_dependents(&graph, new_unit_id);
+    let _ = (
+        scan.pas_files.len(),
+        scan.dpr_files.len(),
+        index.units.len(),
+        index.ambiguous.len(),
+        index.warnings.len(),
+        graph.units.len(),
+        graph.deps.len(),
+        graph.rev.len(),
+        graph.warnings.len(),
+        dependents.len(),
+    );
+    let _ = index.units.values().next().map(|info| info.name.len());
+    let _ = graph.units.get(new_unit_id.0).map(|info| info.name.len());
 }
 
 fn validate_args(cli: &Cli) -> Result<(), String> {
