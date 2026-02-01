@@ -7,9 +7,11 @@
 - [ ] Wire logging and error handling
 
 ## 2) Filesystem scan + ignore handling
-- [ ] Walk `--search-path` once, collect `.pas` and `.dpr`
-- [ ] Apply `--ignore-paths` filtering
-- [ ] Normalize paths (case + separators) while preserving originals
+- [ ] Parse `--ignore-paths` (repeatable flag and/or comma-separated list)
+- [ ] Normalize ignore entries (trim, normalize separators/case) and treat them as path prefixes
+- [ ] Walk `--search-path` once, collecting `.pas` and `.dpr` while skipping ignored prefixes
+- [ ] Use walkdir (or equivalent) with fast ignore checks to prune ignored directories early
+- [ ] Normalize paths (case + separators) while preserving originals; canonicalize when safe
 
 ## 3) PAS unit index
 - [ ] Implement lightweight lexer (skip `{}`, `(* *)`, `//`, strings)

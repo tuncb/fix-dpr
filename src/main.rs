@@ -2,6 +2,8 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::process;
 
+mod fs_walk;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "fixdpr",
@@ -25,13 +27,24 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(err) = validate_args(cli) {
+    if let Err(err) = validate_args(&cli) {
         eprintln!("error: {err}");
         process::exit(2);
     }
+
+    let search_root = fs_walk::canonicalize_root(&cli.search_path);
+    let ignore_matcher = fs_walk::build_ignore_matcher(&cli.ignore_paths, &search_root);
+    let scan = match fs_walk::scan_files(&search_root, &ignore_matcher) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let _ = (scan.pas_files.len(), scan.dpr_files.len());
 }
 
-fn validate_args(cli: Cli) -> Result<(), String> {
+fn validate_args(cli: &Cli) -> Result<(), String> {
     if !cli.search_path.exists() {
         return Err(format!(
             "--search-path does not exist: {}",
@@ -46,12 +59,6 @@ fn validate_args(cli: Cli) -> Result<(), String> {
     }
 
     validate_new_dependency(&cli.new_dependency, &cli.search_path)?;
-    let _ = cli
-        .ignore_paths
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
 
     Ok(())
 }
