@@ -14,7 +14,7 @@ fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS]
 ### Arguments
 
 - `--search-path PATH`: Root folder to recursively scan for `.dpr` and `.pas`.
-- `--new-dependency VALUE`: A `.pas` file path (absolute or relative to
-  `--search-path`) or a unit name (e.g., `My.Unit`).
+- `--new-dependency VALUE`: A `.pas` file path (absolute or relative to the
+  current working directory).
 - `--ignore-paths PATHS`: Optional folder prefixes to skip; can be repeated or
   comma-separated.

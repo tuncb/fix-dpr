@@ -1,12 +1,12 @@
 use clap::Parser;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
 mod dpr_edit;
 mod fs_walk;
-mod graph;
-mod pas_index;
 mod pas_lex;
+mod unit_cache;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -20,7 +20,7 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     search_path: PathBuf,
 
-    /// Path to a .pas file or a unit name
+    /// Path to a .pas file (absolute or relative to the current directory)
     #[arg(long, value_name = "VALUE")]
     new_dependency: String,
 
@@ -31,7 +31,18 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(err) = validate_args(&cli) {
+    if let Err(err) = validate_search_path(&cli.search_path) {
+        eprintln!("error: {err}");
+        process::exit(2);
+    }
+    let new_dependency_path = match resolve_new_dependency_path(&cli.new_dependency) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(2);
+        }
+    };
+    if let Err(err) = validate_new_dependency_path(&new_dependency_path) {
         eprintln!("error: {err}");
         process::exit(2);
     }
@@ -45,40 +56,37 @@ fn main() {
             process::exit(1);
         }
     };
-    let index = match pas_index::build_unit_index(&scan.pas_files) {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!("error: {err}");
-            process::exit(1);
-        }
-    };
-    let graph = match graph::build_unit_graph(&index) {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!("error: {err}");
-            process::exit(1);
-        }
-    };
-    let new_unit_id = match graph::resolve_new_unit_id(&cli.new_dependency, &graph, &search_root) {
-        Ok(id) => id,
-        Err(err) => {
-            eprintln!("error: {err}");
-            process::exit(1);
-        }
-    };
-    let dependents = graph::compute_dependents(&graph, new_unit_id);
-    let dpr_summary =
-        match dpr_edit::update_dpr_files(&scan.dpr_files, &graph, new_unit_id, &dependents) {
-            Ok(summary) => summary,
-            Err(err) => {
-                eprintln!("error: {err}");
-                process::exit(1);
-            }
-        };
-
     let mut warnings = Vec::new();
-    warnings.extend(index.warnings.iter().cloned());
-    warnings.extend(graph.warnings.iter().cloned());
+    let mut unit_cache = match unit_cache::build_unit_cache(&scan.pas_files, &mut warnings) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let new_dependency_path = unit_cache::canonicalize_if_exists(&new_dependency_path);
+    let new_unit = match unit_cache::load_unit_file(&new_dependency_path, &mut warnings) {
+        Ok(Some(unit)) => unit,
+        Ok(None) => {
+            eprintln!(
+                "error: unable to determine unit name from new dependency: {}",
+                new_dependency_path.display()
+            );
+            process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
+    let dpr_summary = match dpr_edit::update_dpr_files(&scan.dpr_files, &mut unit_cache, &new_unit)
+    {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
     warnings.extend(dpr_summary.warnings.iter().cloned());
 
     println!("Summary:");
@@ -97,71 +105,36 @@ fn main() {
     }
 }
 
-fn validate_args(cli: &Cli) -> Result<(), String> {
-    if !cli.search_path.exists() {
+fn validate_search_path(search_path: &Path) -> Result<(), String> {
+    if !search_path.exists() {
         return Err(format!(
             "--search-path does not exist: {}",
-            cli.search_path.display()
+            search_path.display()
         ));
     }
-    if !cli.search_path.is_dir() {
+    if !search_path.is_dir() {
         return Err(format!(
             "--search-path is not a directory: {}",
-            cli.search_path.display()
+            search_path.display()
         ));
     }
-
-    validate_new_dependency(&cli.new_dependency, &cli.search_path)?;
 
     Ok(())
 }
 
-fn validate_new_dependency(value: &str, search_path: &Path) -> Result<(), String> {
+fn resolve_new_dependency_path(value: &str) -> Result<PathBuf, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("--new-dependency cannot be empty".to_string());
     }
 
-    if is_probably_path(trimmed) {
-        let candidate = PathBuf::from(trimmed);
-        if candidate.is_file() {
-            if !is_pas_file(&candidate) {
-                return Err(format!(
-                    "--new-dependency must point to a .pas file: {}",
-                    candidate.display()
-                ));
-            }
-            return Ok(());
-        }
-        if candidate.is_relative() {
-            let alt = search_path.join(&candidate);
-            if alt.is_file() {
-                if !is_pas_file(&alt) {
-                    return Err(format!(
-                        "--new-dependency must point to a .pas file: {}",
-                        alt.display()
-                    ));
-                }
-                return Ok(());
-            }
-        }
-        return Err(format!(
-            "--new-dependency path not found: {}",
-            candidate.display()
-        ));
+    let mut path = PathBuf::from(trimmed);
+    if path.is_relative() {
+        let cwd =
+            env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
+        path = cwd.join(path);
     }
-
-    if is_valid_unit_name(trimmed) {
-        return Ok(());
-    }
-
-    Err(format!(
-        "--new-dependency must be a .pas path or unit name: {trimmed}"
-    ))
-}
-
-fn is_probably_path(value: &str) -> bool {
-    value.contains('/') || value.contains('\\') || value.to_ascii_lowercase().ends_with(".pas")
+    Ok(path)
 }
 
 fn is_pas_file(path: &Path) -> bool {
@@ -171,14 +144,18 @@ fn is_pas_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_valid_unit_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    let first = match chars.next() {
-        Some(ch) => ch,
-        None => return false,
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
+fn validate_new_dependency_path(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!(
+            "--new-dependency path not found: {}",
+            path.display()
+        ));
     }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+    if !is_pas_file(path) {
+        return Err(format!(
+            "--new-dependency must point to a .pas file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
