@@ -10,6 +10,7 @@ use crate::unit_cache::{self, UnitCache, UnitFileInfo};
 pub struct DprUpdateSummary {
     pub scanned: usize,
     pub updated: usize,
+    pub updated_paths: Vec<PathBuf>,
     pub warnings: Vec<String>,
     pub failures: usize,
 }
@@ -40,6 +41,7 @@ pub fn update_dpr_files(
     let mut summary = DprUpdateSummary {
         scanned: 0,
         updated: 0,
+        updated_paths: Vec::new(),
         warnings: Vec::new(),
         failures: 0,
     };
@@ -110,6 +112,7 @@ pub fn update_dpr_files(
         };
         if updated {
             summary.updated += 1;
+            summary.updated_paths.push(path.clone());
         }
     }
 
