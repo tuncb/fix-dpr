@@ -115,6 +115,13 @@ fn main() {
         .saturating_sub(dpr_summary.failures);
 
     println!();
+    if !warnings.is_empty() {
+        println!("Warnings ({}):", warnings.len());
+        for warning in &warnings {
+            println!("  {warning}");
+        }
+        println!();
+    }
     println!("Report:");
     println!("  pas scanned: {}", scan.pas_files.len());
     println!("  dpr scanned: {}", dpr_summary.scanned);
@@ -127,12 +134,6 @@ fn main() {
     } else {
         for path in &dpr_summary.updated_paths {
             println!("  {}", display_path(path, &search_root));
-        }
-    }
-    if !warnings.is_empty() {
-        println!("Warnings ({}):", warnings.len());
-        for warning in &warnings {
-            println!("  {warning}");
         }
     }
 
