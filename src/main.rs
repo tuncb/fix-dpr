@@ -28,6 +28,10 @@ struct Cli {
     /// Optional list of folder prefixes to skip (repeatable or comma-separated)
     #[arg(long, value_name = "PATHS", value_delimiter = ',', action = clap::ArgAction::Append)]
     ignore_paths: Vec<String>,
+
+    /// Show detailed warnings list
+    #[arg(long)]
+    show_warnings: bool,
 }
 
 fn main() {
@@ -115,13 +119,14 @@ fn main() {
         .saturating_sub(dpr_summary.failures);
 
     println!();
-    if !warnings.is_empty() {
-        println!("Warnings ({}):", warnings.len());
+    println!("Warnings: {}", warnings.len());
+    if cli.show_warnings && !warnings.is_empty() {
+        println!("Warnings list:");
         for warning in &warnings {
             println!("  {warning}");
         }
-        println!();
     }
+    println!();
     println!("Report:");
     println!("  pas scanned: {}", scan.pas_files.len());
     println!("  dpr scanned: {}", dpr_summary.scanned);
