@@ -18,3 +18,10 @@ fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS]
   current working directory).
 - `--ignore-paths PATHS`: Optional folder prefixes to skip; can be repeated or
   comma-separated.
+
+
+## Features
+
+- `uses` lists can include `{$I ...}` / `{$INCLUDE ...}` fragments in both `.pas`
+and `.dpr` files. Include paths are resolved relative to the file that references
+them.
