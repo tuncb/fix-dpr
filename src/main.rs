@@ -8,6 +8,7 @@ mod dpr_edit;
 mod fs_walk;
 mod pas_lex;
 mod unit_cache;
+mod uses_include;
 
 #[derive(Parser, Debug)]
 #[command(

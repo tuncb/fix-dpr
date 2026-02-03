@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::pas_lex;
+use crate::uses_include;
 
 #[derive(Debug, Clone)]
 pub struct UnitFileInfo {
@@ -56,7 +57,7 @@ pub fn load_unit_file(path: &Path, warnings: &mut Vec<String>) -> io::Result<Opt
         Some(value) => value,
         None => return Ok(None),
     };
-    let uses = parse_unit_uses(&bytes);
+    let uses = parse_unit_uses(path, &bytes, warnings);
     Ok(Some(UnitFileInfo {
         name,
         path: path.to_path_buf(),
@@ -155,7 +156,7 @@ enum Section {
     Implementation,
 }
 
-pub fn parse_unit_uses(bytes: &[u8]) -> Vec<String> {
+pub fn parse_unit_uses(path: &Path, bytes: &[u8], warnings: &mut Vec<String>) -> Vec<String> {
     let mut deps = Vec::new();
     let mut i = 0;
     let mut section = Section::None;
@@ -181,7 +182,17 @@ pub fn parse_unit_uses(bytes: &[u8]) -> Vec<String> {
                 } else if token.eq_ignore_ascii_case("implementation") {
                     section = Section::Implementation;
                 } else if token.eq_ignore_ascii_case("uses") && section != Section::None {
-                    i = parse_uses_list(bytes, next, &mut deps);
+                    let mut include_stack = Vec::new();
+                    include_stack.push(canonicalize_if_exists(path));
+                    let (next_i, _) = parse_uses_fragment_with_includes(
+                        bytes,
+                        next,
+                        path,
+                        warnings,
+                        &mut deps,
+                        &mut include_stack,
+                    );
+                    i = next_i;
                     continue;
                 }
                 i = next;
@@ -195,14 +206,21 @@ pub fn parse_unit_uses(bytes: &[u8]) -> Vec<String> {
     deps
 }
 
-fn parse_uses_list(bytes: &[u8], mut i: usize, deps: &mut Vec<String>) -> usize {
+fn parse_uses_fragment_with_includes(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+    deps: &mut Vec<String>,
+    include_stack: &mut Vec<PathBuf>,
+) -> (usize, bool) {
     loop {
-        i = pas_lex::skip_ws_and_comments(bytes, i);
+        i = skip_ws_comments_and_includes(bytes, i, source_path, warnings, deps, include_stack);
         if i >= bytes.len() {
-            return i;
+            return (i, false);
         }
         if bytes[i] == b';' {
-            return i + 1;
+            return (i + 1, true);
         }
         if !pas_lex::is_ident_start(bytes[i]) {
             i += 1;
@@ -225,12 +243,13 @@ fn parse_uses_list(bytes: &[u8], mut i: usize, deps: &mut Vec<String>) -> usize 
             }
         }
 
-        let (pos, delim) = skip_to_delimiter(bytes, i);
+        let (pos, delim) =
+            scan_to_delimiter_with_includes(bytes, i, source_path, warnings, deps, include_stack);
         i = pos;
         match delim {
             Some(b',') => i += 1,
-            Some(b';') => return i + 1,
-            _ => return i,
+            Some(b';') => return (i + 1, true),
+            _ => return (i, false),
         }
     }
 }
@@ -243,13 +262,38 @@ fn peek_ident(bytes: &[u8], i: usize) -> Option<(String, usize)> {
     None
 }
 
-fn skip_to_delimiter(bytes: &[u8], mut i: usize) -> (usize, Option<u8>) {
+fn scan_to_delimiter_with_includes(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+    deps: &mut Vec<String>,
+    include_stack: &mut Vec<PathBuf>,
+) -> (usize, Option<u8>) {
     while i < bytes.len() {
         match bytes[i] {
             b',' | b';' => return (i, Some(bytes[i])),
-            b'{' => i = pas_lex::skip_brace_comment(bytes, i + 1),
-            b'(' if bytes.get(i + 1) == Some(&b'*') => {
-                i = pas_lex::skip_paren_comment(bytes, i + 2)
+            b'{' | b'(' => {
+                if let Some((include_name, end)) = pas_lex::parse_include_directive(bytes, i) {
+                    let include_entries = parse_include_entries_for_unit(
+                        include_name.as_str(),
+                        source_path,
+                        warnings,
+                        include_stack,
+                    );
+                    if !include_entries.is_empty() {
+                        deps.extend(include_entries);
+                    }
+                    i = end;
+                    continue;
+                }
+                i = if bytes[i] == b'{' {
+                    pas_lex::skip_brace_comment(bytes, i + 1)
+                } else if bytes.get(i + 1) == Some(&b'*') {
+                    pas_lex::skip_paren_comment(bytes, i + 2)
+                } else {
+                    i + 1
+                };
             }
             b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
             b'\'' => i = pas_lex::skip_string(bytes, i + 1),
@@ -257,6 +301,74 @@ fn skip_to_delimiter(bytes: &[u8], mut i: usize) -> (usize, Option<u8>) {
         }
     }
     (i, None)
+}
+
+fn skip_ws_comments_and_includes(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+    deps: &mut Vec<String>,
+    include_stack: &mut Vec<PathBuf>,
+) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'{' | b'(' => {
+                if let Some((include_name, end)) = pas_lex::parse_include_directive(bytes, i) {
+                    let include_entries = parse_include_entries_for_unit(
+                        include_name.as_str(),
+                        source_path,
+                        warnings,
+                        include_stack,
+                    );
+                    if !include_entries.is_empty() {
+                        deps.extend(include_entries);
+                    }
+                    i = end;
+                    continue;
+                }
+                i = if bytes[i] == b'{' {
+                    pas_lex::skip_brace_comment(bytes, i + 1)
+                } else if bytes.get(i + 1) == Some(&b'*') {
+                    pas_lex::skip_paren_comment(bytes, i + 2)
+                } else {
+                    i + 1
+                };
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
+            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
+            _ => break,
+        }
+    }
+    i
+}
+
+fn parse_include_entries_for_unit(
+    include_name: &str,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+    include_stack: &mut Vec<PathBuf>,
+) -> Vec<String> {
+    uses_include::with_include_bytes(
+        include_name,
+        source_path,
+        warnings,
+        include_stack,
+        |include_path, bytes, warnings, include_stack| {
+            let mut entries = Vec::new();
+            let _ = parse_uses_fragment_with_includes(
+                bytes,
+                0,
+                include_path,
+                warnings,
+                &mut entries,
+                include_stack,
+            );
+            entries
+        },
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -350,7 +462,7 @@ implementation
 uses Baz;
 end.
 "#;
-        let deps = parse_unit_uses(src);
+        let deps = parse_uses_for_test(src);
         assert_eq!(deps, vec!["Foo", "Bar", "Baz"]);
     }
 
@@ -365,7 +477,7 @@ implementation
 uses ImplUnit;
 end.
 "#;
-        let deps = parse_unit_uses(src);
+        let deps = parse_uses_for_test(src);
         assert_eq!(deps, vec!["Foo", "RealUnit", "ImplUnit"]);
     }
 
@@ -379,7 +491,7 @@ implementation
 uses Qux;
 end.
 "#;
-        let deps = parse_unit_uses(src);
+        let deps = parse_uses_for_test(src);
         assert_eq!(deps, vec!["Foo", "Bar", "Baz", "Qux"]);
     }
 
@@ -392,8 +504,26 @@ uses Foo in 'Foo.pas', Bar in 'path\Bar.pas';
 implementation
 end.
 "#;
-        let deps = parse_unit_uses(src);
+        let deps = parse_uses_for_test(src);
         assert_eq!(deps, vec!["Foo", "Bar"]);
+    }
+
+    #[test]
+    fn parse_unit_uses_supports_include_fragments() {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let include_path = root.join("Uses.inc");
+        fs::write(&include_path, "Foo,\nBar in 'lib\\\\Bar.pas',\nBaz,").unwrap();
+        let src = br#"
+unit Demo;
+interface
+uses {$I Uses.inc} Qux;
+implementation
+end.
+"#;
+        let mut warnings = Vec::new();
+        let deps = parse_unit_uses(&unit_path, src, &mut warnings);
+        assert_eq!(deps, vec!["Foo", "Bar", "Baz", "Qux"]);
     }
 
     #[test]
@@ -416,5 +546,12 @@ end.
         root.push(format!("fixdpr_unit_cache_{nanos}"));
         fs::create_dir_all(&root).expect("create temp dir");
         root
+    }
+
+    fn parse_uses_for_test(src: &[u8]) -> Vec<String> {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let mut warnings = Vec::new();
+        parse_unit_uses(&unit_path, src, &mut warnings)
     }
 }

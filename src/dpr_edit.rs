@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::pas_lex;
 use crate::unit_cache::{self, UnitCache, UnitFileInfo};
+use crate::uses_include;
 
 #[derive(Debug)]
 pub struct DprUpdateSummary {
@@ -59,7 +60,7 @@ pub fn update_dpr_files(
                 continue;
             }
         };
-        let Some(list) = parse_dpr_uses(&bytes) else {
+        let Some(list) = parse_dpr_uses(path, &bytes, &mut summary.warnings) else {
             summary
                 .warnings
                 .push(format!("warning: no uses list found in {}", path.display()));
@@ -419,7 +420,7 @@ fn relative_path(target: &Path, base: Option<&Path>) -> String {
     target.to_string_lossy().to_string()
 }
 
-fn parse_dpr_uses(bytes: &[u8]) -> Option<UsesList> {
+fn parse_dpr_uses(dpr_path: &Path, bytes: &[u8], warnings: &mut Vec<String>) -> Option<UsesList> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -432,7 +433,7 @@ fn parse_dpr_uses(bytes: &[u8]) -> Option<UsesList> {
             byte if pas_lex::is_ident_start(byte) => {
                 let (token, next) = pas_lex::read_ident(bytes, i);
                 if token.eq_ignore_ascii_case("uses") {
-                    return parse_dpr_uses_list(bytes, next);
+                    return parse_dpr_uses_list(dpr_path, bytes, next, warnings);
                 }
                 i = next;
             }
@@ -442,53 +443,32 @@ fn parse_dpr_uses(bytes: &[u8]) -> Option<UsesList> {
     None
 }
 
-fn parse_dpr_uses_list(bytes: &[u8], mut i: usize) -> Option<UsesList> {
+fn parse_dpr_uses_list(
+    dpr_path: &Path,
+    bytes: &[u8],
+    i: usize,
+    warnings: &mut Vec<String>,
+) -> Option<UsesList> {
     let list_start = i;
     let mut entries = Vec::new();
-    let mut semicolon = None;
     let mut has_backslash = false;
     let mut has_slash = false;
+    let mut include_semicolon = false;
+    let mut include_stack = Vec::new();
+    include_stack.push(unit_cache::canonicalize_if_exists(dpr_path));
+    let mut state = DprParseState {
+        warnings,
+        include_stack: &mut include_stack,
+        has_backslash: &mut has_backslash,
+        has_slash: &mut has_slash,
+        include_semicolon: &mut include_semicolon,
+    };
 
-    loop {
-        i = pas_lex::skip_ws_and_comments(bytes, i);
-        if i >= bytes.len() {
-            break;
-        }
-        if bytes[i] == b';' {
-            semicolon = Some(i);
-            break;
-        }
-        if !pas_lex::is_ident_start(bytes[i]) {
-            i += 1;
-            continue;
-        }
-
-        let entry_start = i;
-        let (name, next) = pas_lex::read_ident_with_dots(bytes, i);
-        i = next;
-        i = pas_lex::skip_ws_and_comments(bytes, i);
-
-        let (in_path, pos, delim) = scan_entry_tail(bytes, i);
-        update_separator_flags(bytes, entry_start, pos, &mut has_backslash, &mut has_slash);
-        entries.push(UsesEntry {
-            name,
-            in_path,
-            start: entry_start,
-            delimiter: delim,
-        });
-        match delim {
-            Some(b',') => i = pos + 1,
-            Some(b';') => {
-                semicolon = Some(pos);
-                break;
-            }
-            _ => {
-                break;
-            }
-        }
+    let semicolon =
+        parse_uses_fragment_for_dpr(bytes, i, dpr_path, &mut entries, &mut state, None)?;
+    if include_semicolon {
+        return None;
     }
-
-    let semicolon = semicolon?;
     if entries.is_empty() {
         return None;
     }
@@ -512,19 +492,241 @@ fn parse_dpr_uses_list(bytes: &[u8], mut i: usize) -> Option<UsesList> {
     })
 }
 
-fn infer_indent(bytes: &[u8], entry_start: usize) -> String {
-    let line_start = bytes[..entry_start]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    let indent_bytes = &bytes[line_start..entry_start];
-    let indent = indent_bytes
-        .iter()
-        .take_while(|&&b| b == b' ' || b == b'\t')
-        .copied()
-        .collect::<Vec<_>>();
-    String::from_utf8_lossy(&indent).to_string()
+struct DprParseState<'a> {
+    warnings: &'a mut Vec<String>,
+    include_stack: &'a mut Vec<PathBuf>,
+    has_backslash: &'a mut bool,
+    has_slash: &'a mut bool,
+    include_semicolon: &'a mut bool,
+}
+
+fn parse_uses_fragment_for_dpr(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    entries: &mut Vec<UsesEntry>,
+    state: &mut DprParseState<'_>,
+    entry_start_override: Option<usize>,
+) -> Option<usize> {
+    while i < bytes.len() {
+        i = skip_ws_comments_and_includes_dpr(
+            bytes,
+            i,
+            source_path,
+            entries,
+            state,
+            entry_start_override,
+        );
+        if i >= bytes.len() {
+            return None;
+        }
+        if bytes[i] == b';' {
+            if entry_start_override.is_some() {
+                state.warnings.push(format!(
+                    "warning: include file {} contains ';' in uses list",
+                    source_path.display()
+                ));
+                *state.include_semicolon = true;
+            }
+            return Some(i);
+        }
+        if !pas_lex::is_ident_start(bytes[i]) {
+            i += 1;
+            continue;
+        }
+
+        let entry_start = i;
+        let (name, next) = pas_lex::read_ident_with_dots(bytes, i);
+        i = next;
+        i = pas_lex::skip_ws_and_comments(bytes, i);
+
+        let mut in_path = None;
+        if let Some((token, next_token)) = peek_ident(bytes, i) {
+            if token.eq_ignore_ascii_case("in") {
+                i = next_token;
+                i = skip_ws_and_comments_no_strings(bytes, i);
+                if i < bytes.len() && bytes[i] == b'\'' {
+                    if let Some((value, end)) = pas_lex::read_string_literal(bytes, i) {
+                        in_path = Some(value);
+                        i = end;
+                    } else {
+                        i = pas_lex::skip_string(bytes, i + 1);
+                    }
+                }
+            }
+        }
+
+        update_path_separator_flags(&in_path, state.has_backslash, state.has_slash);
+
+        let (pos, delim, include_entries) =
+            scan_to_delimiter_with_includes(bytes, i, source_path, state, entry_start_override);
+        let start = entry_start_override.unwrap_or(entry_start);
+        entries.push(UsesEntry {
+            name,
+            in_path,
+            start,
+            delimiter: delim,
+        });
+        if !include_entries.is_empty() {
+            entries.extend(include_entries);
+        }
+        match delim {
+            Some(b',') => i = pos + 1,
+            Some(b';') => return Some(pos),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn skip_ws_comments_and_includes_dpr(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    entries: &mut Vec<UsesEntry>,
+    state: &mut DprParseState<'_>,
+    entry_start_override: Option<usize>,
+) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'{' | b'(' => {
+                if let Some((include_name, end)) = pas_lex::parse_include_directive(bytes, i) {
+                    let anchor = entry_start_override.unwrap_or(i);
+                    let include_entries = parse_include_entries_for_dpr(
+                        include_name.as_str(),
+                        anchor,
+                        source_path,
+                        state,
+                    );
+                    if !include_entries.is_empty() {
+                        entries.extend(include_entries);
+                    }
+                    i = end;
+                    continue;
+                }
+                i = if bytes[i] == b'{' {
+                    pas_lex::skip_brace_comment(bytes, i + 1)
+                } else if bytes.get(i + 1) == Some(&b'*') {
+                    pas_lex::skip_paren_comment(bytes, i + 2)
+                } else {
+                    i + 1
+                };
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
+            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
+            _ => break,
+        }
+    }
+    i
+}
+
+fn scan_to_delimiter_with_includes(
+    bytes: &[u8],
+    mut i: usize,
+    source_path: &Path,
+    state: &mut DprParseState<'_>,
+    entry_start_override: Option<usize>,
+) -> (usize, Option<u8>, Vec<UsesEntry>) {
+    let mut include_entries = Vec::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b',' | b';' => return (i, Some(bytes[i]), include_entries),
+            b'{' | b'(' => {
+                if let Some((include_name, end)) = pas_lex::parse_include_directive(bytes, i) {
+                    let anchor = entry_start_override.unwrap_or(i);
+                    let entries = parse_include_entries_for_dpr(
+                        include_name.as_str(),
+                        anchor,
+                        source_path,
+                        state,
+                    );
+                    if !entries.is_empty() {
+                        include_entries.extend(entries);
+                    }
+                    i = end;
+                    continue;
+                }
+                i = if bytes[i] == b'{' {
+                    pas_lex::skip_brace_comment(bytes, i + 1)
+                } else if bytes.get(i + 1) == Some(&b'*') {
+                    pas_lex::skip_paren_comment(bytes, i + 2)
+                } else {
+                    i + 1
+                };
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
+            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
+            _ => i += 1,
+        }
+    }
+    (i, None, include_entries)
+}
+
+fn parse_include_entries_for_dpr(
+    include_name: &str,
+    anchor: usize,
+    source_path: &Path,
+    state: &mut DprParseState<'_>,
+) -> Vec<UsesEntry> {
+    let DprParseState {
+        warnings,
+        include_stack,
+        has_backslash,
+        has_slash,
+        include_semicolon,
+    } = &mut *state;
+
+    uses_include::with_include_bytes(
+        include_name,
+        source_path,
+        warnings,
+        include_stack,
+        |include_path, bytes, warnings, include_stack| {
+            let mut entries = Vec::new();
+            let mut nested_state = DprParseState {
+                warnings,
+                include_stack,
+                has_backslash,
+                has_slash,
+                include_semicolon,
+            };
+            let _ = parse_uses_fragment_for_dpr(
+                bytes,
+                0,
+                include_path,
+                &mut entries,
+                &mut nested_state,
+                Some(anchor),
+            );
+            entries
+        },
+    )
+    .unwrap_or_default()
+}
+
+fn peek_ident(bytes: &[u8], i: usize) -> Option<(String, usize)> {
+    if i < bytes.len() && pas_lex::is_ident_start(bytes[i]) {
+        let (token, next) = pas_lex::read_ident(bytes, i);
+        return Some((token, next));
+    }
+    None
+}
+
+fn update_path_separator_flags(
+    in_path: &Option<String>,
+    has_backslash: &mut bool,
+    has_slash: &mut bool,
+) {
+    let Some(path) = in_path.as_ref() else {
+        return;
+    };
+    if path.contains('\\') {
+        *has_backslash = true;
+    }
+    if path.contains('/') {
+        *has_slash = true;
+    }
 }
 
 fn skip_ws_and_comments_no_strings(bytes: &[u8], mut i: usize) -> usize {
@@ -542,110 +744,19 @@ fn skip_ws_and_comments_no_strings(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
-fn scan_entry_tail(bytes: &[u8], mut i: usize) -> (Option<String>, usize, Option<u8>) {
-    let mut in_path = None;
-
-    while i < bytes.len() {
-        match bytes[i] {
-            b',' | b';' => return (in_path, i, Some(bytes[i])),
-            b'{' => i = pas_lex::skip_brace_comment(bytes, i + 1),
-            b'(' if bytes.get(i + 1) == Some(&b'*') => {
-                i = pas_lex::skip_paren_comment(bytes, i + 2)
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
-            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
-            byte if pas_lex::is_ident_start(byte) => {
-                let (token, next) = pas_lex::read_ident(bytes, i);
-                if token.eq_ignore_ascii_case("in") {
-                    let mut j = skip_ws_and_comments_no_strings(bytes, next);
-                    if j < bytes.len() && bytes[j] == b'\'' {
-                        if let Some((value, end)) = read_string_literal(bytes, j) {
-                            in_path = Some(value);
-                            i = end;
-                            continue;
-                        }
-                        j = pas_lex::skip_string(bytes, j + 1);
-                    }
-                    i = j;
-                    continue;
-                }
-                i = next;
-            }
-            _ => i += 1,
-        }
-    }
-    (in_path, i, None)
-}
-
-fn read_string_literal(bytes: &[u8], start: usize) -> Option<(String, usize)> {
-    if bytes.get(start) != Some(&b'\'') {
-        return None;
-    }
-    let mut out = Vec::new();
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                if bytes.get(i + 1) == Some(&b'\'') {
-                    out.push(b'\'');
-                    i += 2;
-                } else {
-                    let value = String::from_utf8_lossy(&out).to_string();
-                    return Some((value, i + 1));
-                }
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    None
-}
-
-fn update_separator_flags(
-    bytes: &[u8],
-    start: usize,
-    end: usize,
-    has_backslash: &mut bool,
-    has_slash: &mut bool,
-) {
-    let mut i = start;
-    let end = end.min(bytes.len());
-    while i < end {
-        match bytes[i] {
-            b'{' => i = pas_lex::skip_brace_comment(bytes, i + 1),
-            b'(' if bytes.get(i + 1) == Some(&b'*') => {
-                i = pas_lex::skip_paren_comment(bytes, i + 2)
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
-            b'\'' => {
-                let mut j = i + 1;
-                while j < end {
-                    match bytes[j] {
-                        b'\'' if bytes.get(j + 1) == Some(&b'\'') => {
-                            j += 2;
-                        }
-                        b'\'' => {
-                            j += 1;
-                            break;
-                        }
-                        b'\\' => {
-                            *has_backslash = true;
-                            j += 1;
-                        }
-                        b'/' => {
-                            *has_slash = true;
-                            j += 1;
-                        }
-                        _ => j += 1,
-                    }
-                }
-                i = j;
-            }
-            _ => i += 1,
-        }
-    }
+fn infer_indent(bytes: &[u8], entry_start: usize) -> String {
+    let line_start = bytes[..entry_start]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let indent_bytes = &bytes[line_start..entry_start];
+    let indent = indent_bytes
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .copied()
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&indent).to_string()
 }
 
 fn detect_line_ending(bytes: &[u8]) -> &'static str {
@@ -678,7 +789,10 @@ mod tests {
     #[test]
     fn parse_dpr_uses_single_line() {
         let src = b"program Demo;\nuses Foo, Bar;\nbegin end.";
-        let list = parse_dpr_uses(src).expect("uses list");
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
         assert_eq!(list.entries.len(), 2);
         assert_eq!(list.entries[0].name, "Foo");
         assert_eq!(list.entries[1].name, "Bar");
@@ -691,7 +805,10 @@ mod tests {
     #[test]
     fn parse_dpr_uses_multiline_with_indent_and_paths() {
         let src = b"program Demo;\nuses\n  Foo,\n  Bar in 'lib\\Bar.pas',\n  Baz;\nbegin end.";
-        let list = parse_dpr_uses(src).expect("uses list");
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
         assert_eq!(list.entries.len(), 3);
         assert!(list.multiline);
         assert_eq!(list.indent, "  ");
@@ -710,7 +827,10 @@ program Demo;
 uses Foo, {Bar}, (*Baz*), {$IFDEF X} Qux, {$ENDIF} RealUnit;
 begin end.
 "#;
-        let list = parse_dpr_uses(src).expect("uses list");
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
         let names: Vec<String> = list
             .entries
             .iter()
@@ -729,7 +849,8 @@ begin end.
         fs::write(&pas_path, "unit NewUnit;\ninterface\nend.").unwrap();
 
         let bytes = fs::read(&dpr_path).unwrap();
-        let list = parse_dpr_uses(&bytes).expect("uses list");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, &bytes, &mut warnings).expect("uses list");
         let new_unit = UnitFileInfo {
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
@@ -759,7 +880,8 @@ begin end.
         fs::write(&pas_path, "unit NewUnit;\ninterface\nend.").unwrap();
 
         let bytes = fs::read(&dpr_path).unwrap();
-        let list = parse_dpr_uses(&bytes).expect("uses list");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, &bytes, &mut warnings).expect("uses list");
         let new_unit = UnitFileInfo {
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
@@ -777,7 +899,10 @@ begin end.
     #[test]
     fn parse_dpr_uses_semicolon_on_own_line() {
         let src = b"program Demo;\nuses\n  Foo,\n  Bar\n;\nbegin end.";
-        let list = parse_dpr_uses(src).expect("uses list");
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
         let names: Vec<String> = list
             .entries
             .iter()
@@ -791,9 +916,35 @@ begin end.
     #[test]
     fn parse_dpr_uses_mixed_separators_prefers_existing() {
         let src = b"program Demo;\nuses Foo in 'lib/Foo.pas', Bar in 'lib\\\\Bar.pas';\nbegin end.";
-        let list = parse_dpr_uses(src).expect("uses list");
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
         assert!(list.has_slash);
         assert!(list.has_backslash);
+    }
+
+    #[test]
+    fn parse_dpr_uses_supports_include_fragments() {
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let include_path = root.join("Uses.inc");
+        fs::write(
+            &include_path,
+            "Foo in 'lib\\\\Foo.pas',\nBar,\nBaz in 'lib/Baz.pas',",
+        )
+        .unwrap();
+        let src = b"program Demo;\nuses\n  {$I Uses.inc}\n  Qux;\nbegin end.";
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, src, &mut warnings).expect("uses list");
+        let names: Vec<String> = list
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Foo", "Bar", "Baz", "Qux"]);
+        assert!(list.has_backslash);
+        assert!(list.has_slash);
     }
 
     fn temp_dir() -> PathBuf {
