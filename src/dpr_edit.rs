@@ -22,6 +22,8 @@ struct UsesEntry {
     in_path: Option<String>,
     start: usize,
     delimiter: Option<u8>,
+    delimiter_pos: Option<usize>,
+    from_include: bool,
 }
 
 #[derive(Debug)]
@@ -100,7 +102,8 @@ pub fn update_dpr_files(
             continue;
         }
 
-        let updated = match insert_new_unit(&bytes, path, &list, new_unit) {
+        let insert_after = find_direct_introducer_index(&list, &project_map, &dependents);
+        let updated = match insert_new_unit(&bytes, path, &list, new_unit, insert_after) {
             Ok(value) => value,
             Err(err) => {
                 summary.warnings.push(format!(
@@ -120,8 +123,29 @@ pub fn update_dpr_files(
     Ok(summary)
 }
 
+fn find_direct_introducer_index(
+    list: &UsesList,
+    project_map: &HashMap<String, PathBuf>,
+    dependents: &ProjectDependents,
+) -> Option<usize> {
+    list.entries.iter().enumerate().find_map(|(idx, entry)| {
+        if entry.from_include {
+            return None;
+        }
+        let key = entry.name.to_ascii_lowercase();
+        let path = project_map.get(&key)?;
+        let id = *dependents.id_by_path.get(path)?;
+        if dependents.direct[id] {
+            Some(idx)
+        } else {
+            None
+        }
+    })
+}
+
 struct ProjectDependents {
     dependents: Vec<bool>,
+    direct: Vec<bool>,
     id_by_path: HashMap<PathBuf, usize>,
 }
 
@@ -312,6 +336,7 @@ fn compute_project_dependents(
 
     Ok(ProjectDependents {
         dependents,
+        direct,
         id_by_path,
     })
 }
@@ -360,6 +385,7 @@ fn insert_new_unit(
     dpr_path: &Path,
     list: &UsesList,
     new_unit: &UnitFileInfo,
+    insert_after: Option<usize>,
 ) -> io::Result<bool> {
     let rel_path = relative_path(&new_unit.path, dpr_path.parent());
     let separator = if list.has_backslash {
@@ -372,6 +398,19 @@ fn insert_new_unit(
     let separator_str = separator.to_string();
     let rel_path = rel_path.replace(['\\', '/'], &separator_str);
     let entry_text = format!("{} in '{}'", new_unit.name, rel_path);
+
+    if let Some(idx) = insert_after {
+        if let Some((insert_at, insert_bytes)) =
+            build_insertion_after(bytes, list, idx, entry_text.as_bytes())
+        {
+            let mut output = Vec::with_capacity(bytes.len() + insert_bytes.len());
+            output.extend_from_slice(&bytes[..insert_at]);
+            output.extend_from_slice(&insert_bytes);
+            output.extend_from_slice(&bytes[insert_at..]);
+            write_atomic(dpr_path, &output)?;
+            return Ok(true);
+        }
+    }
 
     let line_ending = detect_line_ending(bytes);
     let last_delim = list.entries.last().and_then(|entry| entry.delimiter);
@@ -409,6 +448,66 @@ fn insert_new_unit(
 
     write_atomic(dpr_path, &output)?;
     Ok(true)
+}
+
+fn build_insertion_after(
+    bytes: &[u8],
+    list: &UsesList,
+    insert_after: usize,
+    entry_text: &[u8],
+) -> Option<(usize, Vec<u8>)> {
+    let entry = list.entries.get(insert_after)?;
+    if entry.from_include {
+        return None;
+    }
+    let delimiter_pos = entry.delimiter_pos?;
+    if entry.delimiter != Some(b',') {
+        return None;
+    }
+    let next_entry = list.entries.get(insert_after + 1)?;
+    let next_start = next_entry.start;
+    if delimiter_pos + 1 > next_start || next_start > bytes.len() {
+        return None;
+    }
+
+    let separator_after = &bytes[delimiter_pos + 1..next_start];
+    let separator_before = separator_before_new_entry(bytes, list, separator_after);
+
+    let mut insertion = Vec::new();
+    insertion.extend_from_slice(&separator_before);
+    insertion.extend_from_slice(entry_text);
+    insertion.push(b',');
+
+    Some((delimiter_pos + 1, insertion))
+}
+
+fn separator_before_new_entry<'a>(
+    bytes: &[u8],
+    list: &UsesList,
+    separator_after: &'a [u8],
+) -> std::borrow::Cow<'a, [u8]> {
+    if separator_after
+        .iter()
+        .all(|byte| byte.is_ascii_whitespace())
+    {
+        return std::borrow::Cow::Borrowed(separator_after);
+    }
+
+    let leading_ws_len = separator_after
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    if leading_ws_len > 0 {
+        return std::borrow::Cow::Borrowed(&separator_after[..leading_ws_len]);
+    }
+
+    let line_ending = detect_line_ending(bytes);
+    let fallback = if list.multiline {
+        format!("{line_ending}{}", list.indent)
+    } else {
+        " ".to_string()
+    };
+    std::borrow::Cow::Owned(fallback.into_bytes())
 }
 
 fn relative_path(target: &Path, base: Option<&Path>) -> String {
@@ -566,6 +665,12 @@ fn parse_uses_fragment_for_dpr(
             in_path,
             start,
             delimiter: delim,
+            delimiter_pos: if entry_start_override.is_some() {
+                None
+            } else {
+                delim.map(|_| pos)
+            },
+            from_include: entry_start_override.is_some(),
         });
         if !include_entries.is_empty() {
             entries.extend(include_entries);
@@ -856,7 +961,7 @@ begin end.
             path: pas_path.clone(),
             uses: Vec::new(),
         };
-        insert_new_unit(&bytes, &dpr_path, &list, &new_unit).unwrap();
+        insert_new_unit(&bytes, &dpr_path, &list, &new_unit, None).unwrap();
 
         let updated = fs::read_to_string(&dpr_path).unwrap();
         assert!(
@@ -887,11 +992,75 @@ begin end.
             path: pas_path.clone(),
             uses: Vec::new(),
         };
-        insert_new_unit(&bytes, &dpr_path, &list, &new_unit).unwrap();
+        insert_new_unit(&bytes, &dpr_path, &list, &new_unit, None).unwrap();
 
         let updated = fs::read_to_string(&dpr_path).unwrap();
         assert!(
             updated.contains("Baz,\r\n  NewUnit in 'sub/NewUnit.pas';"),
+            "{updated}"
+        );
+    }
+
+    #[test]
+    fn insert_new_unit_after_entry_single_line() {
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let pas_path = root.join("NewUnit.pas");
+        fs::write(&dpr_path, "program Demo;\nuses Foo, Bar, Baz;\nbegin end.").unwrap();
+        fs::write(&pas_path, "unit NewUnit;\ninterface\nend.").unwrap();
+
+        let bytes = fs::read(&dpr_path).unwrap();
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, &bytes, &mut warnings).expect("uses list");
+        let insert_after = list
+            .entries
+            .iter()
+            .position(|entry| entry.name == "Bar")
+            .expect("Bar entry");
+        let new_unit = UnitFileInfo {
+            name: "NewUnit".to_string(),
+            path: pas_path.clone(),
+            uses: Vec::new(),
+        };
+        insert_new_unit(&bytes, &dpr_path, &list, &new_unit, Some(insert_after)).unwrap();
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(
+            updated.contains("uses Foo, Bar, NewUnit in 'NewUnit.pas', Baz;"),
+            "{updated}"
+        );
+    }
+
+    #[test]
+    fn insert_new_unit_after_entry_multiline() {
+        let root = temp_dir();
+        let dpr_path = root.join("Demo.dpr");
+        let pas_path = root.join("NewUnit.pas");
+        fs::write(
+            &dpr_path,
+            "program Demo;\r\nuses\r\n  Foo,\r\n  Bar,\r\n  Baz;\r\nbegin end.",
+        )
+        .unwrap();
+        fs::write(&pas_path, "unit NewUnit;\ninterface\nend.").unwrap();
+
+        let bytes = fs::read(&dpr_path).unwrap();
+        let mut warnings = Vec::new();
+        let list = parse_dpr_uses(&dpr_path, &bytes, &mut warnings).expect("uses list");
+        let insert_after = list
+            .entries
+            .iter()
+            .position(|entry| entry.name == "Bar")
+            .expect("Bar entry");
+        let new_unit = UnitFileInfo {
+            name: "NewUnit".to_string(),
+            path: pas_path.clone(),
+            uses: Vec::new(),
+        };
+        insert_new_unit(&bytes, &dpr_path, &list, &new_unit, Some(insert_after)).unwrap();
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(
+            updated.contains("Bar,\r\n  NewUnit in 'NewUnit.pas',\r\n  Baz;"),
             "{updated}"
         );
     }
