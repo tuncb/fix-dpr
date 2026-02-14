@@ -18,17 +18,17 @@ mod uses_include;
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Root folder glob to recursively scan for .dpr and .pas (repeatable)
-    #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
+    /// Root folder path to recursively scan for .dpr and .pas (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     search_path: Vec<String>,
 
     /// Path to a .pas file (absolute or relative to the current directory)
     #[arg(long, value_name = "VALUE")]
     new_dependency: String,
 
-    /// Optional list of folder prefixes to skip (repeatable or comma-separated)
-    #[arg(long, value_name = "PATHS", value_delimiter = ',', action = clap::ArgAction::Append)]
-    ignore_paths: Vec<String>,
+    /// Optional folder path to skip recursively (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    ignore_path: Vec<String>,
 
     /// Optional glob pattern for .dpr files to ignore (repeatable)
     #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
@@ -53,20 +53,14 @@ fn main() {
         }
     };
     let cwd = fs_walk::canonicalize_root(&cwd);
-    let search_resolution = match fs_walk::resolve_search_roots(&cli.search_path, &cwd) {
-        Ok(result) => result,
+    let search_roots = match fs_walk::resolve_search_roots(&cli.search_path, &cwd) {
+        Ok(roots) => roots,
         Err(err) => {
             eprintln!("error: {err}");
             process::exit(2);
         }
     };
-    let search_roots = search_resolution.roots;
     let mut warnings = Vec::new();
-    for pattern in search_resolution.unmatched_patterns {
-        warnings.push(format!(
-            "warning: --search-path pattern matched no directories: {pattern}"
-        ));
-    }
     let new_dependency_path = match resolve_new_dependency_path(&cli.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => {
@@ -78,7 +72,13 @@ fn main() {
         eprintln!("error: {err}");
         process::exit(2);
     }
-    let ignore_matcher = fs_walk::build_ignore_matcher(&cli.ignore_paths, &search_roots);
+    let ignore_matcher = match fs_walk::build_ignore_matcher(&cli.ignore_path, &cwd) {
+        Ok(matcher) => matcher,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(2);
+        }
+    };
     let ignore_dpr_matcher = match fs_walk::build_dpr_ignore_matcher(&cli.ignore_dpr, &cwd) {
         Ok(matcher) => matcher,
         Err(err) => {
@@ -91,7 +91,7 @@ fn main() {
     for root in &search_roots {
         println!("  {}", root.display());
     }
-    let ignore_display = format_ignore_paths(&cli.ignore_paths);
+    let ignore_display = format_ignore_paths(&cli.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }

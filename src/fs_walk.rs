@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
@@ -57,23 +57,13 @@ pub struct DprFilterResult {
     pub ignored_files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Default)]
-pub struct SearchRootsResolution {
-    pub roots: Vec<PathBuf>,
-    pub unmatched_patterns: Vec<String>,
-}
-
 pub fn canonicalize_root(root: &Path) -> PathBuf {
     canonicalize_if_exists(root)
 }
 
-pub fn resolve_search_roots(
-    raw_values: &[String],
-    cwd: &Path,
-) -> Result<SearchRootsResolution, String> {
+pub fn resolve_search_roots(raw_values: &[String], cwd: &Path) -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
-    let mut unmatched_patterns = Vec::new();
 
     for raw in raw_values {
         let trimmed = raw.trim();
@@ -81,63 +71,37 @@ pub fn resolve_search_roots(
             continue;
         }
 
-        let absolute_pattern = if Path::new(trimmed).is_absolute() {
+        let absolute_path = if Path::new(trimmed).is_absolute() {
             PathBuf::from(trimmed)
         } else {
             cwd.join(trimmed)
         };
-        let normalized_pattern = normalize_path_like_for_match(&absolute_pattern.to_string_lossy());
-        let has_glob = contains_glob_chars(trimmed);
-        let mut matched_pattern = false;
 
-        if has_glob {
-            let walk_root = search_pattern_walk_root(&absolute_pattern);
-            if walk_root.is_dir() {
-                let tokens = parse_glob_tokens(&normalized_pattern);
-                let walker = WalkDir::new(walk_root).follow_links(false).into_iter();
-                for entry in walker {
-                    let entry = match entry {
-                        Ok(value) => value,
-                        Err(err) => {
-                            return Err(format!(
-                                "failed to walk search path pattern {trimmed}: {err}"
-                            ));
-                        }
-                    };
-                    if !entry.file_type().is_dir() {
-                        continue;
-                    }
-                    let normalized_entry =
-                        normalize_path_like_for_match(&entry.path().to_string_lossy());
-                    if !glob_matches(&tokens, &normalized_entry) {
-                        continue;
-                    }
-                    matched_pattern = true;
-                    push_unique_root(&mut roots, &mut seen, entry.path());
-                }
-            }
-        } else if absolute_pattern.is_dir() {
-            matched_pattern = true;
-            push_unique_root(&mut roots, &mut seen, &absolute_pattern);
+        if !absolute_path.exists() {
+            return Err(format!(
+                "--search-path does not exist: {}",
+                absolute_path.display()
+            ));
+        }
+        if !absolute_path.is_dir() {
+            return Err(format!(
+                "--search-path is not a directory: {}",
+                absolute_path.display()
+            ));
         }
 
-        if !matched_pattern {
-            unmatched_patterns.push(trimmed.to_string());
-        }
+        push_unique_root(&mut roots, &mut seen, &absolute_path);
     }
 
     if roots.is_empty() {
-        return Err("--search-path did not match any directories".to_string());
+        return Err("--search-path must be provided at least once".to_string());
     }
 
     roots.sort_by_key(|path| normalize_path_for_prefix_match(path));
-    Ok(SearchRootsResolution {
-        roots,
-        unmatched_patterns,
-    })
+    Ok(roots)
 }
 
-pub fn build_ignore_matcher(raw_values: &[String], search_roots: &[PathBuf]) -> IgnoreMatcher {
+pub fn build_ignore_matcher(raw_values: &[String], cwd: &Path) -> Result<IgnoreMatcher, String> {
     let mut prefixes = Vec::new();
     for raw in raw_values {
         let trimmed = raw.trim();
@@ -145,29 +109,30 @@ pub fn build_ignore_matcher(raw_values: &[String], search_roots: &[PathBuf]) -> 
             continue;
         }
 
-        let path = PathBuf::from(trimmed);
-        if path.is_absolute() {
-            let path = canonicalize_if_exists(&path);
-            let normalized = normalize_path_for_prefix_match(&path);
-            if !normalized.is_empty() {
-                prefixes.push(normalized);
-            }
-            continue;
+        let mut path = PathBuf::from(trimmed);
+        if path.is_relative() {
+            path = cwd.join(path);
         }
-
-        for root in search_roots {
-            let path = canonicalize_if_exists(&root.join(&path));
-            let normalized = normalize_path_for_prefix_match(&path);
-            if !normalized.is_empty() {
-                prefixes.push(normalized);
-            }
+        if !path.exists() {
+            return Err(format!("--ignore-path does not exist: {}", path.display()));
+        }
+        if !path.is_dir() {
+            return Err(format!(
+                "--ignore-path is not a directory: {}",
+                path.display()
+            ));
+        }
+        let path = canonicalize_if_exists(&path);
+        let normalized = normalize_path_for_prefix_match(&path);
+        if !normalized.is_empty() {
+            prefixes.push(normalized);
         }
     }
 
     prefixes.sort();
     prefixes.dedup();
 
-    IgnoreMatcher { prefixes }
+    Ok(IgnoreMatcher { prefixes })
 }
 
 pub fn build_dpr_ignore_matcher(
@@ -322,28 +287,6 @@ fn strip_windows_verbatim_prefix(value: String) -> String {
 
 fn canonicalize_if_exists(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn contains_glob_chars(value: &str) -> bool {
-    value.contains('*') || value.contains('?')
-}
-
-fn search_pattern_walk_root(absolute_pattern: &Path) -> PathBuf {
-    let mut root = PathBuf::new();
-    for component in absolute_pattern.components() {
-        match component {
-            Component::Normal(value)
-                if value
-                    .to_string_lossy()
-                    .chars()
-                    .any(|ch| ch == '*' || ch == '?') =>
-            {
-                break;
-            }
-            _ => root.push(component.as_os_str()),
-        }
-    }
-    root
 }
 
 fn push_unique_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: &Path) {
@@ -518,70 +461,75 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn resolve_search_roots_supports_glob_and_dedupes() {
-        let cwd = temp_dir("fixdpr_search_roots_glob_");
+    fn resolve_search_roots_supports_multiple_paths_and_dedupes() {
+        let cwd = temp_dir("fixdpr_search_roots_multi_");
         let root = cwd.join("repo");
         fs::create_dir_all(root.join("app1")).expect("create app1");
         fs::create_dir_all(root.join("app2")).expect("create app2");
 
-        let glob_pattern = root.join("app*").to_string_lossy().to_string();
-        let exact_pattern = root.join("app1").to_string_lossy().to_string();
+        let first = root.join("app1").to_string_lossy().to_string();
+        let duplicate = root.join("app1").to_string_lossy().to_string();
+        let second = root.join("app2").to_string_lossy().to_string();
         let resolved =
-            resolve_search_roots(&[glob_pattern, exact_pattern], &cwd).expect("resolved roots");
+            resolve_search_roots(&[first, duplicate, second], &cwd).expect("resolved roots");
 
         let expected = vec![
             canonicalize_if_exists(&root.join("app1")),
             canonicalize_if_exists(&root.join("app2")),
         ];
-        assert_eq!(resolved.roots, expected);
-        assert!(resolved.unmatched_patterns.is_empty());
+        assert_eq!(resolved, expected);
     }
 
     #[test]
-    fn resolve_search_roots_relative_pattern_is_anchored_to_cwd() {
+    fn resolve_search_roots_relative_path_is_anchored_to_cwd() {
         let cwd = temp_dir("fixdpr_search_roots_rel_");
         let root = cwd.join("repo");
         fs::create_dir_all(root.join("app1")).expect("create app1");
 
-        let resolved = resolve_search_roots(&["repo/app*".to_string()], &cwd).expect("roots");
-        assert_eq!(
-            resolved.roots,
-            vec![canonicalize_if_exists(&root.join("app1"))]
-        );
-        assert!(resolved.unmatched_patterns.is_empty());
+        let resolved = resolve_search_roots(&["repo/app1".to_string()], &cwd).expect("roots");
+        assert_eq!(resolved, vec![canonicalize_if_exists(&root.join("app1"))]);
     }
 
     #[test]
-    fn resolve_search_roots_ignores_non_directory_matches() {
+    fn resolve_search_roots_rejects_non_directory_matches() {
         let cwd = temp_dir("fixdpr_search_roots_non_dir_");
         let root = cwd.join("repo");
         fs::create_dir_all(root.join("app1")).expect("create app1");
         fs::write(root.join("app1.txt"), "x").expect("create file");
 
-        let pattern = root.join("*").to_string_lossy().to_string();
-        let resolved = resolve_search_roots(&[pattern], &cwd).expect("roots");
-        assert_eq!(
-            resolved.roots,
-            vec![canonicalize_if_exists(&root.join("app1"))]
-        );
-        assert!(resolved.unmatched_patterns.is_empty());
+        let path = root.join("app1.txt").to_string_lossy().to_string();
+        let err = resolve_search_roots(&[path], &cwd).expect_err("should reject file path");
+        assert!(err.contains("--search-path is not a directory"), "{err}");
     }
 
     #[test]
-    fn resolve_search_roots_reports_unmatched_patterns() {
+    fn resolve_search_roots_rejects_missing_path() {
         let cwd = temp_dir("fixdpr_search_roots_unmatched_");
         let root = cwd.join("repo");
         fs::create_dir_all(root.join("app1")).expect("create app1");
 
-        let matched = root.join("app*").to_string_lossy().to_string();
-        let unmatched = root.join("missing*").to_string_lossy().to_string();
-        let resolved = resolve_search_roots(&[matched, unmatched.clone()], &cwd).expect("roots");
+        let missing = root.join("missing").to_string_lossy().to_string();
+        let err = resolve_search_roots(&[missing], &cwd).expect_err("should reject missing path");
+        assert!(err.contains("--search-path does not exist"), "{err}");
+    }
 
-        assert_eq!(
-            resolved.roots,
-            vec![canonicalize_if_exists(&root.join("app1"))]
-        );
-        assert_eq!(resolved.unmatched_patterns, vec![unmatched]);
+    #[test]
+    fn build_ignore_matcher_relative_path_is_anchored_to_cwd() {
+        let cwd = temp_dir("fixdpr_ignore_path_rel_");
+        let ignored = cwd.join("repo").join("ignored");
+        fs::create_dir_all(&ignored).expect("create ignored");
+
+        let matcher = build_ignore_matcher(&["repo/ignored".to_string()], &cwd).expect("matcher");
+        let candidate = canonicalize_if_exists(&ignored).join("a.pas");
+        assert!(matcher.is_ignored(&candidate));
+    }
+
+    #[test]
+    fn build_ignore_matcher_rejects_missing_path() {
+        let cwd = temp_dir("fixdpr_ignore_path_missing_");
+        fs::create_dir_all(cwd.join("repo")).expect("create repo");
+        let err = build_ignore_matcher(&["repo/missing".to_string()], &cwd).expect_err("missing");
+        assert!(err.contains("--ignore-path does not exist"), "{err}");
     }
 
     #[test]

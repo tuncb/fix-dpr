@@ -20,8 +20,8 @@ fn end_to_end_updates_expected_dprs() {
         .arg(&temp_root)
         .arg("--new-dependency")
         .arg(&new_dependency)
-        .arg("--ignore-paths")
-        .arg("ignored")
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
         .output()
         .expect("run fixdpr");
 
@@ -127,7 +127,7 @@ fn end_to_end_search_path_can_be_repeated_for_multiple_roots() {
 }
 
 #[test]
-fn end_to_end_search_path_glob_dedupes_overlapping_roots() {
+fn end_to_end_search_path_dedupes_overlapping_roots() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
         .join("tests")
@@ -143,11 +143,13 @@ fn end_to_end_search_path_glob_dedupes_overlapping_roots() {
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
         .arg("--search-path")
-        .arg(temp_root.join("app*"))
+        .arg(&temp_root)
         .arg("--search-path")
         .arg(temp_root.join("app1"))
         .arg("--new-dependency")
         .arg(&new_dependency)
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
         .output()
         .expect("run fixdpr");
 
@@ -199,60 +201,37 @@ fn end_to_end_search_path_glob_dedupes_overlapping_roots() {
 }
 
 #[test]
-fn end_to_end_unmatched_search_path_pattern_is_reported_as_warning() {
+fn end_to_end_search_path_requires_existing_directory() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
         .join("tests")
         .join("fixtures")
         .join("synthetic_repo");
-    let expected_root = repo_root
-        .join("tests")
-        .join("fixtures")
-        .join("synthetic_expected");
     let temp_root = temp_dir("fixdpr_e2e_search_warn_");
     copy_dir(&fixture_root, &temp_root);
 
     let matched_root = temp_root.clone();
-    let unmatched_pattern = temp_root.join("missing*");
+    let missing_path = temp_root.join("missing");
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
         .arg("--search-path")
         .arg(&matched_root)
         .arg("--search-path")
-        .arg(&unmatched_pattern)
+        .arg(&missing_path)
         .arg("--new-dependency")
         .arg(&new_dependency)
-        .arg("--show-warnings")
         .output()
         .expect("run fixdpr");
 
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Warnings:"), "{stdout}");
-    assert!(stdout.contains("Warnings list:"), "{stdout}");
-    assert!(
-        stdout.contains("--search-path pattern matched no directories"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(unmatched_pattern.to_string_lossy().as_ref()),
-        "{stdout}"
-    );
-
-    let app1_actual = normalize_newlines(
-        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1 actual"),
-    );
-    let app1_expected = normalize_newlines(
-        fs::read_to_string(expected_root.join("app1").join("App1.dpr"))
-            .expect("read app1 expected"),
-    );
-    assert_eq!(app1_actual, app1_expected, "app1 should be updated");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--search-path does not exist"), "{stderr}");
 }
 
 #[test]
@@ -277,8 +256,8 @@ fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
         .arg(&temp_root)
         .arg("--new-dependency")
         .arg(&new_dependency)
-        .arg("--ignore-paths")
-        .arg("ignored")
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
         .arg("--ignore-dpr")
         .arg(&ignored_dpr)
         .arg("--show-infos")
@@ -336,8 +315,8 @@ fn end_to_end_relative_ignore_pattern_from_repo_root_does_not_match_temp_repo() 
         .arg(&temp_root)
         .arg("--new-dependency")
         .arg(&new_dependency)
-        .arg("--ignore-paths")
-        .arg("ignored")
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
         .arg("--ignore-dpr")
         .arg("app4/*.dpr")
         .arg("--show-infos")
@@ -386,7 +365,7 @@ fn end_to_end_relative_ignore_pattern_from_search_root_matches() {
         .arg(&temp_root)
         .arg("--new-dependency")
         .arg(&new_dependency)
-        .arg("--ignore-paths")
+        .arg("--ignore-path")
         .arg("ignored")
         .arg("--ignore-dpr")
         .arg("app4/*.dpr")
