@@ -60,6 +60,202 @@ fn end_to_end_updates_expected_dprs() {
 }
 
 #[test]
+fn end_to_end_search_path_can_be_repeated_for_multiple_roots() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_expected");
+    let temp_root = temp_dir("fixdpr_e2e_multi_search_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(temp_root.join("app1"))
+        .arg("--search-path")
+        .arg(temp_root.join("app2"))
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let app1_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1 actual"),
+    );
+    let app1_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app1").join("App1.dpr"))
+            .expect("read app1 expected"),
+    );
+    assert_eq!(app1_actual, app1_expected, "app1 should be updated");
+
+    let app2_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app2").join("App2.dpr")).expect("read app2 actual"),
+    );
+    let app2_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app2").join("App2.dpr"))
+            .expect("read app2 expected"),
+    );
+    assert_eq!(app2_actual, app2_expected, "app2 should be updated");
+
+    let app3_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app3").join("App3.dpr")).expect("read app3 actual"),
+    );
+    let app3_expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app3").join("App3.dpr")).expect("read app3 expected"),
+    );
+    assert_eq!(app3_actual, app3_expected, "app3 should not be scanned");
+
+    let app4_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app4").join("App4.dpr")).expect("read app4 actual"),
+    );
+    let app4_expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app4").join("App4.dpr")).expect("read app4 expected"),
+    );
+    assert_eq!(app4_actual, app4_expected, "app4 should not be scanned");
+}
+
+#[test]
+fn end_to_end_search_path_glob_dedupes_overlapping_roots() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_expected");
+    let temp_root = temp_dir("fixdpr_e2e_glob_search_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(temp_root.join("app*"))
+        .arg("--search-path")
+        .arg(temp_root.join("app1"))
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dpr scanned: 4"), "{stdout}");
+
+    let app1_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1 actual"),
+    );
+    let app1_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app1").join("App1.dpr"))
+            .expect("read app1 expected"),
+    );
+    assert_eq!(app1_actual, app1_expected, "app1 should be updated");
+
+    let app2_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app2").join("App2.dpr")).expect("read app2 actual"),
+    );
+    let app2_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app2").join("App2.dpr"))
+            .expect("read app2 expected"),
+    );
+    assert_eq!(app2_actual, app2_expected, "app2 should be updated");
+
+    let app3_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app3").join("App3.dpr")).expect("read app3 actual"),
+    );
+    let app3_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app3").join("App3.dpr"))
+            .expect("read app3 expected"),
+    );
+    assert_eq!(app3_actual, app3_expected, "app3 should be updated");
+
+    let app4_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app4").join("App4.dpr")).expect("read app4 actual"),
+    );
+    let app4_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app4").join("App4.dpr"))
+            .expect("read app4 expected"),
+    );
+    assert_eq!(app4_actual, app4_expected, "app4 should be updated");
+}
+
+#[test]
+fn end_to_end_unmatched_search_path_pattern_is_reported_as_warning() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_expected");
+    let temp_root = temp_dir("fixdpr_e2e_search_warn_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let matched_root = temp_root.clone();
+    let unmatched_pattern = temp_root.join("missing*");
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&matched_root)
+        .arg("--search-path")
+        .arg(&unmatched_pattern)
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .arg("--show-warnings")
+        .output()
+        .expect("run fixdpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Warnings:"), "{stdout}");
+    assert!(stdout.contains("Warnings list:"), "{stdout}");
+    assert!(
+        stdout.contains("--search-path pattern matched no directories"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(unmatched_pattern.to_string_lossy().as_ref()),
+        "{stdout}"
+    );
+
+    let app1_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1 actual"),
+    );
+    let app1_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app1").join("App1.dpr"))
+            .expect("read app1 expected"),
+    );
+    assert_eq!(app1_actual, app1_expected, "app1 should be updated");
+}
+
+#[test]
 fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root

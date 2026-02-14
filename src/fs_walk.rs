@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use walkdir::WalkDir;
 
@@ -56,11 +57,87 @@ pub struct DprFilterResult {
     pub ignored_files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Default)]
+pub struct SearchRootsResolution {
+    pub roots: Vec<PathBuf>,
+    pub unmatched_patterns: Vec<String>,
+}
+
 pub fn canonicalize_root(root: &Path) -> PathBuf {
     canonicalize_if_exists(root)
 }
 
-pub fn build_ignore_matcher(raw_values: &[String], search_root: &Path) -> IgnoreMatcher {
+pub fn resolve_search_roots(
+    raw_values: &[String],
+    cwd: &Path,
+) -> Result<SearchRootsResolution, String> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut unmatched_patterns = Vec::new();
+
+    for raw in raw_values {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let absolute_pattern = if Path::new(trimmed).is_absolute() {
+            PathBuf::from(trimmed)
+        } else {
+            cwd.join(trimmed)
+        };
+        let normalized_pattern = normalize_path_like_for_match(&absolute_pattern.to_string_lossy());
+        let has_glob = contains_glob_chars(trimmed);
+        let mut matched_pattern = false;
+
+        if has_glob {
+            let walk_root = search_pattern_walk_root(&absolute_pattern);
+            if walk_root.is_dir() {
+                let tokens = parse_glob_tokens(&normalized_pattern);
+                let walker = WalkDir::new(walk_root).follow_links(false).into_iter();
+                for entry in walker {
+                    let entry = match entry {
+                        Ok(value) => value,
+                        Err(err) => {
+                            return Err(format!(
+                                "failed to walk search path pattern {trimmed}: {err}"
+                            ));
+                        }
+                    };
+                    if !entry.file_type().is_dir() {
+                        continue;
+                    }
+                    let normalized_entry =
+                        normalize_path_like_for_match(&entry.path().to_string_lossy());
+                    if !glob_matches(&tokens, &normalized_entry) {
+                        continue;
+                    }
+                    matched_pattern = true;
+                    push_unique_root(&mut roots, &mut seen, entry.path());
+                }
+            }
+        } else if absolute_pattern.is_dir() {
+            matched_pattern = true;
+            push_unique_root(&mut roots, &mut seen, &absolute_pattern);
+        }
+
+        if !matched_pattern {
+            unmatched_patterns.push(trimmed.to_string());
+        }
+    }
+
+    if roots.is_empty() {
+        return Err("--search-path did not match any directories".to_string());
+    }
+
+    roots.sort_by_key(|path| normalize_path_for_prefix_match(path));
+    Ok(SearchRootsResolution {
+        roots,
+        unmatched_patterns,
+    })
+}
+
+pub fn build_ignore_matcher(raw_values: &[String], search_roots: &[PathBuf]) -> IgnoreMatcher {
     let mut prefixes = Vec::new();
     for raw in raw_values {
         let trimmed = raw.trim();
@@ -68,14 +145,22 @@ pub fn build_ignore_matcher(raw_values: &[String], search_root: &Path) -> Ignore
             continue;
         }
 
-        let mut path = PathBuf::from(trimmed);
-        if path.is_relative() {
-            path = search_root.join(path);
+        let path = PathBuf::from(trimmed);
+        if path.is_absolute() {
+            let path = canonicalize_if_exists(&path);
+            let normalized = normalize_path_for_prefix_match(&path);
+            if !normalized.is_empty() {
+                prefixes.push(normalized);
+            }
+            continue;
         }
-        let path = canonicalize_if_exists(&path);
-        let normalized = normalize_path_for_prefix_match(&path);
-        if !normalized.is_empty() {
-            prefixes.push(normalized);
+
+        for root in search_roots {
+            let path = canonicalize_if_exists(&root.join(&path));
+            let normalized = normalize_path_for_prefix_match(&path);
+            if !normalized.is_empty() {
+                prefixes.push(normalized);
+            }
         }
     }
 
@@ -111,10 +196,40 @@ pub fn build_dpr_ignore_matcher(
     })
 }
 
-pub fn scan_files(search_root: &Path, ignore: &IgnoreMatcher) -> io::Result<FsScan> {
+pub fn scan_files(search_roots: &[PathBuf], ignore: &IgnoreMatcher) -> io::Result<FsScan> {
     let mut pas_files = Vec::new();
     let mut dpr_files = Vec::new();
+    let mut seen_pas = HashSet::new();
+    let mut seen_dpr = HashSet::new();
 
+    for root in search_roots {
+        scan_files_under_root(
+            root,
+            ignore,
+            &mut pas_files,
+            &mut dpr_files,
+            &mut seen_pas,
+            &mut seen_dpr,
+        )?;
+    }
+
+    pas_files.sort();
+    dpr_files.sort();
+
+    Ok(FsScan {
+        pas_files,
+        dpr_files,
+    })
+}
+
+fn scan_files_under_root(
+    search_root: &Path,
+    ignore: &IgnoreMatcher,
+    pas_files: &mut Vec<PathBuf>,
+    dpr_files: &mut Vec<PathBuf>,
+    seen_pas: &mut HashSet<String>,
+    seen_dpr: &mut HashSet<String>,
+) -> io::Result<()> {
     let walker = WalkDir::new(search_root)
         .follow_links(false)
         .into_iter()
@@ -137,17 +252,17 @@ pub fn scan_files(search_root: &Path, ignore: &IgnoreMatcher) -> io::Result<FsSc
             continue;
         }
 
+        let dedupe_key = normalize_path_for_prefix_match(path);
         if has_extension(path, "pas") {
-            pas_files.push(path.to_path_buf());
-        } else if has_extension(path, "dpr") {
+            if seen_pas.insert(dedupe_key) {
+                pas_files.push(path.to_path_buf());
+            }
+        } else if has_extension(path, "dpr") && seen_dpr.insert(dedupe_key) {
             dpr_files.push(path.to_path_buf());
         }
     }
 
-    Ok(FsScan {
-        pas_files,
-        dpr_files,
-    })
+    Ok(())
 }
 
 pub fn filter_ignored_dpr_files(
@@ -207,6 +322,36 @@ fn strip_windows_verbatim_prefix(value: String) -> String {
 
 fn canonicalize_if_exists(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn contains_glob_chars(value: &str) -> bool {
+    value.contains('*') || value.contains('?')
+}
+
+fn search_pattern_walk_root(absolute_pattern: &Path) -> PathBuf {
+    let mut root = PathBuf::new();
+    for component in absolute_pattern.components() {
+        match component {
+            Component::Normal(value)
+                if value
+                    .to_string_lossy()
+                    .chars()
+                    .any(|ch| ch == '*' || ch == '?') =>
+            {
+                break;
+            }
+            _ => root.push(component.as_os_str()),
+        }
+    }
+    root
+}
+
+fn push_unique_root(roots: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: &Path) {
+    let canonical = canonicalize_if_exists(path);
+    let key = normalize_path_for_prefix_match(&canonical);
+    if seen.insert(key) {
+        roots.push(canonical);
+    }
 }
 
 fn normalize_path_for_prefix_match(path: &Path) -> String {
@@ -369,7 +514,75 @@ fn has_extension(path: &Path, extension: &str) -> bool {
 mod tests {
     use super::*;
     use std::env;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resolve_search_roots_supports_glob_and_dedupes() {
+        let cwd = temp_dir("fixdpr_search_roots_glob_");
+        let root = cwd.join("repo");
+        fs::create_dir_all(root.join("app1")).expect("create app1");
+        fs::create_dir_all(root.join("app2")).expect("create app2");
+
+        let glob_pattern = root.join("app*").to_string_lossy().to_string();
+        let exact_pattern = root.join("app1").to_string_lossy().to_string();
+        let resolved =
+            resolve_search_roots(&[glob_pattern, exact_pattern], &cwd).expect("resolved roots");
+
+        let expected = vec![
+            canonicalize_if_exists(&root.join("app1")),
+            canonicalize_if_exists(&root.join("app2")),
+        ];
+        assert_eq!(resolved.roots, expected);
+        assert!(resolved.unmatched_patterns.is_empty());
+    }
+
+    #[test]
+    fn resolve_search_roots_relative_pattern_is_anchored_to_cwd() {
+        let cwd = temp_dir("fixdpr_search_roots_rel_");
+        let root = cwd.join("repo");
+        fs::create_dir_all(root.join("app1")).expect("create app1");
+
+        let resolved = resolve_search_roots(&["repo/app*".to_string()], &cwd).expect("roots");
+        assert_eq!(
+            resolved.roots,
+            vec![canonicalize_if_exists(&root.join("app1"))]
+        );
+        assert!(resolved.unmatched_patterns.is_empty());
+    }
+
+    #[test]
+    fn resolve_search_roots_ignores_non_directory_matches() {
+        let cwd = temp_dir("fixdpr_search_roots_non_dir_");
+        let root = cwd.join("repo");
+        fs::create_dir_all(root.join("app1")).expect("create app1");
+        fs::write(root.join("app1.txt"), "x").expect("create file");
+
+        let pattern = root.join("*").to_string_lossy().to_string();
+        let resolved = resolve_search_roots(&[pattern], &cwd).expect("roots");
+        assert_eq!(
+            resolved.roots,
+            vec![canonicalize_if_exists(&root.join("app1"))]
+        );
+        assert!(resolved.unmatched_patterns.is_empty());
+    }
+
+    #[test]
+    fn resolve_search_roots_reports_unmatched_patterns() {
+        let cwd = temp_dir("fixdpr_search_roots_unmatched_");
+        let root = cwd.join("repo");
+        fs::create_dir_all(root.join("app1")).expect("create app1");
+
+        let matched = root.join("app*").to_string_lossy().to_string();
+        let unmatched = root.join("missing*").to_string_lossy().to_string();
+        let resolved = resolve_search_roots(&[matched, unmatched.clone()], &cwd).expect("roots");
+
+        assert_eq!(
+            resolved.roots,
+            vec![canonicalize_if_exists(&root.join("app1"))]
+        );
+        assert_eq!(resolved.unmatched_patterns, vec![unmatched]);
+    }
 
     #[test]
     fn build_dpr_ignore_matcher_normalizes_absolute_pattern() {

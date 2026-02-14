@@ -8,12 +8,16 @@ list that already references a unit that depends on it.
 ## Usage
 
 ```
-fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS] [--ignore-dpr GLOB]
+fixdpr --search-path GLOB [--search-path GLOB] --new-dependency VALUE [--ignore-paths PATHS] [--ignore-dpr GLOB]
 ```
 
 ### Arguments
 
-- `--search-path PATH`: Root folder to recursively scan for `.dpr` and `.pas`.
+- `--search-path GLOB`: Root directory pattern to recursively scan for `.dpr` and
+  `.pas`; can be repeated. Relative patterns are resolved from the current
+  working directory and matched against absolute directory paths. Non-directory
+  matches are ignored. If at least one search root matches, unmatched patterns
+  are reported as warnings.
 - `--new-dependency VALUE`: A `.pas` file path (absolute or relative to the
   current working directory).
 - `--ignore-paths PATHS`: Optional folder prefixes to skip; can be repeated or

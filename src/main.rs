@@ -18,9 +18,9 @@ mod uses_include;
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Root folder to recursively scan for .dpr and .pas
-    #[arg(long, value_name = "PATH")]
-    search_path: PathBuf,
+    /// Root folder glob to recursively scan for .dpr and .pas (repeatable)
+    #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
+    search_path: Vec<String>,
 
     /// Path to a .pas file (absolute or relative to the current directory)
     #[arg(long, value_name = "VALUE")]
@@ -45,11 +45,29 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(err) = validate_search_path(&cli.search_path) {
-        eprintln!("error: {err}");
-        process::exit(2);
+    let cwd = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: failed to read current directory: {err}");
+            process::exit(2);
+        }
+    };
+    let cwd = fs_walk::canonicalize_root(&cwd);
+    let search_resolution = match fs_walk::resolve_search_roots(&cli.search_path, &cwd) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(2);
+        }
+    };
+    let search_roots = search_resolution.roots;
+    let mut warnings = Vec::new();
+    for pattern in search_resolution.unmatched_patterns {
+        warnings.push(format!(
+            "warning: --search-path pattern matched no directories: {pattern}"
+        ));
     }
-    let new_dependency_path = match resolve_new_dependency_path(&cli.new_dependency) {
+    let new_dependency_path = match resolve_new_dependency_path(&cli.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => {
             eprintln!("error: {err}");
@@ -60,17 +78,7 @@ fn main() {
         eprintln!("error: {err}");
         process::exit(2);
     }
-
-    let cwd = match env::current_dir() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("error: failed to read current directory: {err}");
-            process::exit(2);
-        }
-    };
-    let cwd = fs_walk::canonicalize_root(&cwd);
-    let search_root = fs_walk::canonicalize_root(&cli.search_path);
-    let ignore_matcher = fs_walk::build_ignore_matcher(&cli.ignore_paths, &search_root);
+    let ignore_matcher = fs_walk::build_ignore_matcher(&cli.ignore_paths, &search_roots);
     let ignore_dpr_matcher = match fs_walk::build_dpr_ignore_matcher(&cli.ignore_dpr, &cwd) {
         Ok(matcher) => matcher,
         Err(err) => {
@@ -79,7 +87,10 @@ fn main() {
         }
     };
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
-    println!("Scanning {}", search_root.display());
+    println!("Scanning {} root(s):", search_roots.len());
+    for root in &search_roots {
+        println!("  {}", root.display());
+    }
     let ignore_display = format_ignore_paths(&cli.ignore_paths);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
@@ -88,7 +99,7 @@ fn main() {
     if !ignore_dpr_display.is_empty() {
         println!("Ignoring dpr (absolute): {}", ignore_dpr_display);
     }
-    let scan = match fs_walk::scan_files(&search_root, &ignore_matcher) {
+    let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error: {err}");
@@ -105,7 +116,6 @@ fn main() {
         scan.pas_files.len(),
         scan.dpr_files.len()
     );
-    let mut warnings = Vec::new();
     println!("Building unit cache...");
     let mut unit_cache = match unit_cache::build_unit_cache(&scan.pas_files, &mut warnings) {
         Ok(result) => result,
@@ -179,7 +189,7 @@ fn main() {
         println!("  (none)");
     } else {
         for path in &dpr_summary.updated_paths {
-            println!("  {}", display_path(path, &search_root));
+            println!("  {}", display_path(path, &search_roots));
         }
     }
 
@@ -188,24 +198,7 @@ fn main() {
     }
 }
 
-fn validate_search_path(search_path: &Path) -> Result<(), String> {
-    if !search_path.exists() {
-        return Err(format!(
-            "--search-path does not exist: {}",
-            search_path.display()
-        ));
-    }
-    if !search_path.is_dir() {
-        return Err(format!(
-            "--search-path is not a directory: {}",
-            search_path.display()
-        ));
-    }
-
-    Ok(())
-}
-
-fn resolve_new_dependency_path(value: &str) -> Result<PathBuf, String> {
+fn resolve_new_dependency_path(value: &str, cwd: &Path) -> Result<PathBuf, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("--new-dependency cannot be empty".to_string());
@@ -213,8 +206,6 @@ fn resolve_new_dependency_path(value: &str) -> Result<PathBuf, String> {
 
     let mut path = PathBuf::from(trimmed);
     if path.is_relative() {
-        let cwd =
-            env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
         path = cwd.join(path);
     }
     Ok(path)
@@ -255,9 +246,15 @@ fn format_ignore_paths(values: &[String]) -> String {
     entries.join(", ")
 }
 
-fn display_path(path: &Path, root: &Path) -> String {
-    diff_paths(path, root)
-        .unwrap_or_else(|| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
+fn display_path(path: &Path, roots: &[PathBuf]) -> String {
+    for root in roots {
+        if path.starts_with(root) {
+            return diff_paths(path, root)
+                .unwrap_or_else(|| path.to_path_buf())
+                .to_string_lossy()
+                .to_string();
+        }
+    }
+
+    path.to_string_lossy().to_string()
 }
