@@ -59,6 +59,66 @@ fn end_to_end_updates_expected_dprs() {
     }
 }
 
+#[test]
+fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_expected");
+    let temp_root = temp_dir("fixdpr_e2e_ignore_dpr_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let ignored_dpr = temp_root.join("app4").join("App4.dpr");
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .current_dir(&repo_root)
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .arg("--ignore-paths")
+        .arg("ignored")
+        .arg("--ignore-dpr")
+        .arg(&ignored_dpr)
+        .arg("--show-infos")
+        .output()
+        .expect("run fixdpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Infos: 1"), "{stdout}");
+    assert!(stdout.contains("Infos list:"), "{stdout}");
+    assert!(stdout.contains("dpr ignored: 1"), "{stdout}");
+
+    let app4_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app4").join("App4.dpr")).expect("read app4 actual"),
+    );
+    let app4_expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app4").join("App4.dpr")).expect("read app4 expected"),
+    );
+    assert_eq!(app4_actual, app4_expected, "app4 should be ignored");
+
+    let app1_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1 actual"),
+    );
+    let app1_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app1").join("App1.dpr"))
+            .expect("read app1 expected"),
+    );
+    assert_eq!(app1_actual, app1_expected, "app1 should still be updated");
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
     for entry in fs::read_dir(src).expect("read dir") {

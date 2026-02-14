@@ -30,6 +30,14 @@ struct Cli {
     #[arg(long, value_name = "PATHS", value_delimiter = ',', action = clap::ArgAction::Append)]
     ignore_paths: Vec<String>,
 
+    /// Optional glob pattern for .dpr files to ignore (repeatable)
+    #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
+    ignore_dpr: Vec<String>,
+
+    /// Show detailed info list
+    #[arg(long)]
+    show_infos: bool,
+
     /// Show detailed warnings list
     #[arg(long)]
     show_warnings: bool,
@@ -53,13 +61,32 @@ fn main() {
         process::exit(2);
     }
 
+    let cwd = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: failed to read current directory: {err}");
+            process::exit(2);
+        }
+    };
+    let cwd = fs_walk::canonicalize_root(&cwd);
     let search_root = fs_walk::canonicalize_root(&cli.search_path);
     let ignore_matcher = fs_walk::build_ignore_matcher(&cli.ignore_paths, &search_root);
+    let ignore_dpr_matcher = match fs_walk::build_dpr_ignore_matcher(&cli.ignore_dpr, &cwd) {
+        Ok(matcher) => matcher,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(2);
+        }
+    };
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Scanning {}", search_root.display());
     let ignore_display = format_ignore_paths(&cli.ignore_paths);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let ignore_dpr_display = format_ignore_paths(ignore_dpr_matcher.normalized_patterns());
+    if !ignore_dpr_display.is_empty() {
+        println!("Ignoring dpr (absolute): {}", ignore_dpr_display);
     }
     let scan = match fs_walk::scan_files(&search_root, &ignore_matcher) {
         Ok(result) => result,
@@ -68,6 +95,11 @@ fn main() {
             process::exit(1);
         }
     };
+    let dpr_filter = fs_walk::filter_ignored_dpr_files(&scan.dpr_files, &ignore_dpr_matcher);
+    let mut infos = Vec::new();
+    for path in &dpr_filter.ignored_files {
+        infos.push(format!("info: ignored dpr {}", path.display()));
+    }
     println!(
         "Found {} .pas, {} .dpr",
         scan.pas_files.len(),
@@ -103,15 +135,15 @@ fn main() {
         new_unit.name,
         new_unit.path.display()
     );
-    println!("Updating .dpr files... {}", scan.dpr_files.len());
-    let dpr_summary = match dpr_edit::update_dpr_files(&scan.dpr_files, &mut unit_cache, &new_unit)
-    {
-        Ok(summary) => summary,
-        Err(err) => {
-            eprintln!("error: {err}");
-            process::exit(1);
-        }
-    };
+    println!("Updating .dpr files... {}", dpr_filter.included_files.len());
+    let dpr_summary =
+        match dpr_edit::update_dpr_files(&dpr_filter.included_files, &mut unit_cache, &new_unit) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(1);
+            }
+        };
     warnings.extend(dpr_summary.warnings.iter().cloned());
 
     let unchanged = dpr_summary
@@ -120,6 +152,13 @@ fn main() {
         .saturating_sub(dpr_summary.failures);
 
     println!();
+    println!("Infos: {}", infos.len());
+    if cli.show_infos && !infos.is_empty() {
+        println!("Infos list:");
+        for info in &infos {
+            println!("  {info}");
+        }
+    }
     println!("Warnings: {}", warnings.len());
     if cli.show_warnings && !warnings.is_empty() {
         println!("Warnings list:");
@@ -131,6 +170,7 @@ fn main() {
     println!("Report:");
     println!("  pas scanned: {}", scan.pas_files.len());
     println!("  dpr scanned: {}", dpr_summary.scanned);
+    println!("  dpr ignored: {}", dpr_filter.ignored_files.len());
     println!("  dpr updated: {}", dpr_summary.updated);
     println!("  dpr unchanged: {}", unchanged);
     println!("  dpr failures: {}", dpr_summary.failures);

@@ -8,7 +8,7 @@ list that already references a unit that depends on it.
 ## Usage
 
 ```
-fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS]
+fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS] [--ignore-dpr GLOB]
 ```
 
 ### Arguments
@@ -18,6 +18,11 @@ fixdpr --search-path PATH --new-dependency VALUE [--ignore-paths PATHS]
   current working directory).
 - `--ignore-paths PATHS`: Optional folder prefixes to skip; can be repeated or
   comma-separated.
+- `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated.
+  Relative patterns are resolved from the current working directory, then matched
+  against absolute `.dpr` paths.
+- `--show-infos`: Show detailed info messages.
+- `--show-warnings`: Show detailed warning messages.
 
 
 ## Features
