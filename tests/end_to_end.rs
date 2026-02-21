@@ -16,6 +16,7 @@ fn end_to_end_updates_expected_dprs() {
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
         .arg("--new-dependency")
@@ -75,6 +76,7 @@ fn end_to_end_search_path_can_be_repeated_for_multiple_roots() {
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(temp_root.join("app1"))
         .arg("--search-path")
@@ -142,6 +144,7 @@ fn end_to_end_search_path_dedupes_overlapping_roots() {
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
         .arg("--search-path")
@@ -214,6 +217,7 @@ fn end_to_end_search_path_requires_existing_directory() {
     let missing_path = temp_root.join("missing");
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&matched_root)
         .arg("--search-path")
@@ -251,6 +255,7 @@ fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
     let ignored_dpr = temp_root.join("app4").join("App4.dpr");
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .current_dir(&repo_root)
         .arg("--search-path")
         .arg(&temp_root)
@@ -310,6 +315,7 @@ fn end_to_end_relative_ignore_pattern_from_repo_root_does_not_match_temp_repo() 
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .current_dir(&repo_root)
         .arg("--search-path")
         .arg(&temp_root)
@@ -360,6 +366,7 @@ fn end_to_end_relative_ignore_pattern_from_search_root_matches() {
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .current_dir(&temp_root)
         .arg("--search-path")
         .arg(&temp_root)
@@ -410,6 +417,7 @@ fn end_to_end_delphi_path_enables_transitive_external_resolution() {
     create_delphi_path_fixture(&without_project, &without_delphi);
 
     let without_output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&without_project)
         .arg("--new-dependency")
@@ -438,6 +446,7 @@ fn end_to_end_delphi_path_enables_transitive_external_resolution() {
     create_delphi_path_fixture(&with_project, &with_delphi);
 
     let with_output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&with_project)
         .arg("--new-dependency")
@@ -474,6 +483,7 @@ fn end_to_end_delphi_version_reports_error_for_unknown_version() {
 
     let new_dependency = temp_root.join("common").join("NewUnit.pas");
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
         .arg("--new-dependency")
@@ -511,6 +521,7 @@ fn end_to_end_adds_introduced_dependencies_by_default() {
     create_introduced_dependency_fixture(&project_root, &shared_root);
 
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&root)
         .arg("--new-dependency")
@@ -550,6 +561,7 @@ fn end_to_end_disable_introduced_dependencies_flag_restores_single_insert_behavi
     create_introduced_dependency_fixture(&project_root, &shared_root);
 
     let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
         .arg("--search-path")
         .arg(&root)
         .arg("--new-dependency")
@@ -579,6 +591,95 @@ fn end_to_end_disable_introduced_dependencies_flag_restores_single_insert_behavi
     assert!(
         !dpr.contains("BaseUnit in '..\\shared\\BaseUnit.pas'"),
         "BaseUnit should not be inserted when disabled:\n{dpr}"
+    );
+}
+
+#[test]
+fn end_to_end_fix_dpr_repairs_missing_chain_for_target_file() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let temp_root = temp_dir("fixdpr_e2e_fix_dpr_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let target_dpr = temp_root.join("app1").join("App1.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("fix-dpr")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--dpr-file")
+        .arg(&target_dpr)
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
+        .output()
+        .expect("run fixdpr fix-dpr mode");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dpr scanned: 1"), "{stdout}");
+
+    let app1 = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read updated app1"),
+    );
+    assert!(app1.contains("UnitA in 'UnitA.pas'"), "{app1}");
+    assert!(
+        app1.contains("NewUnit in '..\\common\\NewUnit.pas'"),
+        "{app1}"
+    );
+
+    let app2 = normalize_newlines(
+        fs::read_to_string(temp_root.join("app2").join("App2.dpr")).expect("read app2"),
+    );
+    let app2_expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app2").join("App2.dpr")).expect("read app2 expected"),
+    );
+    assert_eq!(
+        app2, app2_expected,
+        "non-target dpr should remain unchanged"
+    );
+}
+
+#[test]
+fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let temp_root = temp_dir("fixdpr_e2e_fix_dpr_ignore_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let target_dpr = temp_root.join("app1").join("App1.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("fix-dpr")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--dpr-file")
+        .arg(&target_dpr)
+        .arg("--ignore-dpr")
+        .arg(&target_dpr)
+        .output()
+        .expect("run fixdpr fix-dpr mode with ignored target");
+
+    assert!(
+        !output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--dpr-file is ignored by --ignore-dpr"),
+        "{stderr}"
     );
 }
 

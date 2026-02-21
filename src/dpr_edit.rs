@@ -247,6 +247,227 @@ pub fn update_dpr_files(
     Ok(summary)
 }
 
+pub fn fix_dpr_file(dpr_path: &Path, project_cache: &UnitCache) -> io::Result<DprUpdateSummary> {
+    let dpr_path = unit_cache::canonicalize_if_exists(dpr_path);
+    let mut summary = DprUpdateSummary {
+        scanned: 1,
+        updated: 0,
+        updated_paths: Vec::new(),
+        warnings: Vec::new(),
+        failures: 0,
+    };
+
+    let bytes = match fs::read(&dpr_path) {
+        Ok(data) => data,
+        Err(err) => {
+            summary.warnings.push(format!(
+                "warning: failed to read dpr {}: {err}",
+                dpr_path.display()
+            ));
+            summary.failures += 1;
+            return Ok(summary);
+        }
+    };
+    let Some(list) = parse_dpr_uses(&dpr_path, &bytes, &mut summary.warnings) else {
+        summary.warnings.push(format!(
+            "warning: no uses list found in {}",
+            dpr_path.display()
+        ));
+        summary.failures += 1;
+        return Ok(summary);
+    };
+    let mut current_bytes = bytes;
+    let mut current_list = list;
+    let existing_names: HashSet<String> = current_list
+        .entries
+        .iter()
+        .map(|entry| entry.name.to_ascii_lowercase())
+        .collect();
+
+    let project_map = build_project_map(
+        &dpr_path,
+        &current_list,
+        project_cache,
+        None,
+        &mut summary.warnings,
+    );
+    let root_paths = collect_fix_root_paths(
+        &dpr_path,
+        &current_list,
+        &project_map,
+        project_cache,
+        &mut summary.warnings,
+    );
+    if root_paths.is_empty() {
+        return Ok(summary);
+    }
+
+    let missing_units = collect_missing_dpr_dependencies(
+        &root_paths,
+        &existing_names,
+        project_cache,
+        &mut summary.warnings,
+    );
+    if missing_units.is_empty() {
+        return Ok(summary);
+    }
+
+    let mut dpr_updated = false;
+    let mut last_inserted_name = None::<String>;
+    for dep_unit in missing_units {
+        let dep_insert_after = last_inserted_name.as_ref().and_then(|name| {
+            current_list
+                .entries
+                .iter()
+                .position(|entry| !entry.from_include && entry.name.eq_ignore_ascii_case(name))
+        });
+        let dep_updated = match insert_new_unit(
+            &current_bytes,
+            &dpr_path,
+            &current_list,
+            &dep_unit,
+            dep_insert_after,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                summary.warnings.push(format!(
+                    "warning: failed to update dpr {}: {err}",
+                    dpr_path.display()
+                ));
+                summary.failures += 1;
+                return Ok(summary);
+            }
+        };
+        if !dep_updated {
+            continue;
+        }
+
+        dpr_updated = true;
+        last_inserted_name = Some(dep_unit.name);
+        let reloaded = match reload_dpr_state(&dpr_path, &mut summary.warnings) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                summary.warnings.push(format!(
+                    "warning: no uses list found in {}",
+                    dpr_path.display()
+                ));
+                summary.failures += 1;
+                return Ok(summary);
+            }
+            Err(err) => {
+                summary.warnings.push(format!(
+                    "warning: failed to read dpr {}: {err}",
+                    dpr_path.display()
+                ));
+                summary.failures += 1;
+                return Ok(summary);
+            }
+        };
+        current_bytes = reloaded.0;
+        current_list = reloaded.1;
+    }
+
+    if dpr_updated {
+        summary.updated += 1;
+        summary.updated_paths.push(dpr_path);
+    }
+
+    Ok(summary)
+}
+
+fn collect_fix_root_paths(
+    dpr_path: &Path,
+    list: &UsesList,
+    project_map: &HashMap<String, PathBuf>,
+    project_cache: &UnitCache,
+    warnings: &mut Vec<String>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in &list.entries {
+        let key = entry.name.to_ascii_lowercase();
+        let Some(path) = project_map.get(&key) else {
+            continue;
+        };
+        let canonical = unit_cache::canonicalize_if_exists(path);
+        if !project_cache.by_path.contains_key(&canonical) {
+            warnings.push(format!(
+                "warning: unit {} in {} resolved outside --search-path unit cache and will be ignored",
+                entry.name,
+                dpr_path.display()
+            ));
+            continue;
+        }
+        if seen.insert(canonical.clone()) {
+            roots.push(canonical);
+        }
+    }
+
+    roots
+}
+
+fn collect_missing_dpr_dependencies(
+    root_paths: &[PathBuf],
+    existing_names: &HashSet<String>,
+    project_cache: &UnitCache,
+    warnings: &mut Vec<String>,
+) -> Vec<UnitFileInfo> {
+    let mut queue = VecDeque::new();
+    let mut seen_paths = HashSet::new();
+    let mut missing_names = HashSet::new();
+    let mut missing_units = Vec::new();
+
+    for path in root_paths {
+        if seen_paths.insert(path.clone()) {
+            queue.push_back(path.clone());
+        }
+    }
+
+    while let Some(unit_path) = queue.pop_front() {
+        let Some(unit_info) = project_cache.by_path.get(&unit_path) else {
+            continue;
+        };
+
+        for dep in &unit_info.uses {
+            let dep_key = dep.to_ascii_lowercase();
+            let dep_path = match resolve_by_name(project_cache, None, dep.as_str()) {
+                ResolveByName::Unique { path, .. } => path,
+                ResolveByName::Ambiguous { count, source } => {
+                    warnings.push(format!(
+                        "warning: ambiguous unit {} referenced by {} ({} {} matches)",
+                        dep,
+                        unit_path.display(),
+                        count,
+                        source_label(source)
+                    ));
+                    continue;
+                }
+                ResolveByName::NotFound => continue,
+            };
+            let dep_path = unit_cache::canonicalize_if_exists(&dep_path);
+            if !project_cache.by_path.contains_key(&dep_path) {
+                continue;
+            }
+            if seen_paths.insert(dep_path.clone()) {
+                queue.push_back(dep_path.clone());
+            }
+
+            if existing_names.contains(&dep_key) {
+                continue;
+            }
+            if !missing_names.insert(dep_key) {
+                continue;
+            }
+            if let Some(dep_info) = project_cache.by_path.get(&dep_path) {
+                missing_units.push(dep_info.clone());
+            }
+        }
+    }
+
+    missing_units
+}
+
 fn reload_dpr_state(
     path: &Path,
     warnings: &mut Vec<String>,
@@ -1487,6 +1708,84 @@ begin end.
             .map(|unit| unit.name.to_ascii_lowercase())
             .collect();
         assert_eq!(names, vec!["midunit", "baseunit"]);
+    }
+
+    #[test]
+    fn fix_dpr_file_adds_missing_transitive_dependencies_from_project_cache() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let unit_a = root.join("UnitA.pas");
+        let unit_b = root.join("UnitB.pas");
+        let unit_c = root.join("UnitC.pas");
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  UnitA in 'UnitA.pas';\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &unit_a,
+            "unit UnitA;\ninterface\nuses UnitB;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &unit_b,
+            "unit UnitB;\ninterface\nuses UnitC;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(&unit_c, "unit UnitC;\ninterface\nimplementation\nend.\n").unwrap();
+
+        let mut warnings = Vec::new();
+        let cache = unit_cache::build_unit_cache(
+            &[unit_a.clone(), unit_b.clone(), unit_c.clone()],
+            &mut warnings,
+        )
+        .unwrap();
+
+        let first = fix_dpr_file(&dpr_path, &cache).unwrap();
+        assert_eq!(first.failures, 0, "{first:?}");
+        assert_eq!(first.updated, 1, "{first:?}");
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(updated.contains("UnitB in 'UnitB.pas'"), "{updated}");
+        assert!(updated.contains("UnitC in 'UnitC.pas'"), "{updated}");
+
+        let second = fix_dpr_file(&dpr_path, &cache).unwrap();
+        assert_eq!(second.failures, 0, "{second:?}");
+        assert_eq!(second.updated, 0, "{second:?}");
+    }
+
+    #[test]
+    fn fix_dpr_file_skips_dependencies_not_in_project_cache() {
+        let root = temp_dir();
+        let external = root.join("external");
+        fs::create_dir_all(&external).unwrap();
+        let dpr_path = root.join("App.dpr");
+        let unit_a = root.join("UnitA.pas");
+        let ext_unit = external.join("ExtUnit.pas");
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  UnitA in 'UnitA.pas';\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &unit_a,
+            "unit UnitA;\ninterface\nuses ExtUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &ext_unit,
+            "unit ExtUnit;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let cache =
+            unit_cache::build_unit_cache(std::slice::from_ref(&unit_a), &mut warnings).unwrap();
+
+        let result = fix_dpr_file(&dpr_path, &cache).unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 0, "{result:?}");
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(!updated.contains("ExtUnit in "), "{updated}");
     }
 
     fn temp_dir() -> PathBuf {
