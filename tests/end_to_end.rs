@@ -503,6 +503,85 @@ fn end_to_end_delphi_version_reports_error_for_unknown_version() {
     );
 }
 
+#[test]
+fn end_to_end_adds_introduced_dependencies_by_default() {
+    let root = temp_dir("fixdpr_e2e_introduced_default_");
+    let project_root = root.join("app");
+    let shared_root = root.join("shared");
+    create_introduced_dependency_fixture(&project_root, &shared_root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&root)
+        .arg("--new-dependency")
+        .arg(shared_root.join("NewUnit.pas"))
+        .output()
+        .expect("run fixdpr with introduced dependencies enabled");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dpr = normalize_newlines(
+        fs::read_to_string(project_root.join("App.dpr")).expect("read updated dpr"),
+    );
+    assert!(
+        dpr.contains("NewUnit in '..\\shared\\NewUnit.pas'"),
+        "missing NewUnit entry:\n{dpr}"
+    );
+    assert!(
+        dpr.contains("MidUnit in '..\\shared\\MidUnit.pas'"),
+        "missing MidUnit entry:\n{dpr}"
+    );
+    assert!(
+        dpr.contains("BaseUnit in '..\\shared\\BaseUnit.pas'"),
+        "missing BaseUnit entry:\n{dpr}"
+    );
+}
+
+#[test]
+fn end_to_end_disable_introduced_dependencies_flag_restores_single_insert_behavior() {
+    let root = temp_dir("fixdpr_e2e_introduced_disabled_");
+    let project_root = root.join("app");
+    let shared_root = root.join("shared");
+    create_introduced_dependency_fixture(&project_root, &shared_root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&root)
+        .arg("--new-dependency")
+        .arg(shared_root.join("NewUnit.pas"))
+        .arg("--disable-introduced-dependencies")
+        .output()
+        .expect("run fixdpr with introduced dependencies disabled");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dpr = normalize_newlines(
+        fs::read_to_string(project_root.join("App.dpr")).expect("read updated dpr"),
+    );
+    assert!(
+        dpr.contains("NewUnit in '..\\shared\\NewUnit.pas'"),
+        "missing NewUnit entry:\n{dpr}"
+    );
+    assert!(
+        !dpr.contains("MidUnit in '..\\shared\\MidUnit.pas'"),
+        "MidUnit should not be inserted when disabled:\n{dpr}"
+    );
+    assert!(
+        !dpr.contains("BaseUnit in '..\\shared\\BaseUnit.pas'"),
+        "BaseUnit should not be inserted when disabled:\n{dpr}"
+    );
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
     for entry in fs::read_dir(src).expect("read dir") {
@@ -530,6 +609,37 @@ fn temp_dir(prefix: &str) -> PathBuf {
 
 fn normalize_newlines(contents: String) -> String {
     contents.replace("\r\n", "\n")
+}
+
+fn create_introduced_dependency_fixture(project_root: &Path, shared_root: &Path) {
+    fs::create_dir_all(project_root).expect("create project root");
+    fs::create_dir_all(shared_root).expect("create shared root");
+
+    fs::write(
+        project_root.join("App.dpr"),
+        "program App;\nuses\n  UnitA in 'UnitA.pas';\nbegin\nend.\n",
+    )
+    .expect("write App.dpr");
+    fs::write(
+        project_root.join("UnitA.pas"),
+        "unit UnitA;\ninterface\nuses NewUnit;\nimplementation\nend.\n",
+    )
+    .expect("write UnitA.pas");
+    fs::write(
+        shared_root.join("NewUnit.pas"),
+        "unit NewUnit;\ninterface\nuses MidUnit;\nimplementation\nend.\n",
+    )
+    .expect("write NewUnit.pas");
+    fs::write(
+        shared_root.join("MidUnit.pas"),
+        "unit MidUnit;\ninterface\nuses BaseUnit;\nimplementation\nend.\n",
+    )
+    .expect("write MidUnit.pas");
+    fs::write(
+        shared_root.join("BaseUnit.pas"),
+        "unit BaseUnit;\ninterface\nimplementation\nend.\n",
+    )
+    .expect("write BaseUnit.pas");
 }
 
 fn create_delphi_path_fixture(project_root: &Path, delphi_root: &Path) {

@@ -8,7 +8,7 @@ list that already references a unit that depends on it.
 ## Usage
 
 ```
-fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB]
+fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies]
 ```
 
 ### Arguments
@@ -29,6 +29,9 @@ fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-
 - `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated.
   Relative patterns are resolved from the current working directory, then matched
   against absolute `.dpr` paths.
+- `--disable-introduced-dependencies`: Disable inserting transitive dependencies
+  referenced by `--new-dependency`; by default, these introduced dependencies are
+  also inserted when needed.
 - `--show-infos`: Show detailed info messages.
 - `--show-warnings`: Show detailed warning messages.
 

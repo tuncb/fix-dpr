@@ -574,7 +574,10 @@ mod tests {
             .expect("matcher");
 
         let expected = normalize_path_like_for_match(&pattern.to_string_lossy());
-        assert_eq!(matcher.normalized_patterns(), &[expected.clone()]);
+        assert_eq!(
+            matcher.normalized_patterns(),
+            std::slice::from_ref(&expected)
+        );
         assert!(matcher.is_ignored(&pattern.to_string_lossy()));
     }
 

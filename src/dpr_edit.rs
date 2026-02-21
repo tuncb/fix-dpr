@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,7 @@ pub fn update_dpr_files(
     project_cache: &mut UnitCache,
     mut delphi_cache: Option<&mut UnitCache>,
     new_unit: &UnitFileInfo,
+    add_introduced_dependencies: bool,
 ) -> io::Result<DprUpdateSummary> {
     let mut summary = DprUpdateSummary {
         scanned: 0,
@@ -50,7 +51,7 @@ pub fn update_dpr_files(
         failures: 0,
     };
 
-    for path in dpr_paths {
+    'dpr_loop: for path in dpr_paths {
         summary.scanned += 1;
         let bytes = match fs::read(path) {
             Ok(data) => data,
@@ -70,69 +71,189 @@ pub fn update_dpr_files(
             summary.failures += 1;
             continue;
         };
+        let mut current_bytes = bytes;
+        let mut current_list = list;
 
         let project_map = build_project_map(
             path,
-            &list,
+            &current_list,
             project_cache,
             delphi_cache.as_deref(),
             &mut summary.warnings,
         );
-        if list
+        let has_new_unit = current_list
             .entries
             .iter()
-            .any(|entry| entry.name.eq_ignore_ascii_case(&new_unit.name))
-        {
-            continue;
-        }
-        if project_map.is_empty() {
-            continue;
-        }
+            .any(|entry| entry.name.eq_ignore_ascii_case(&new_unit.name));
 
-        let dependents = compute_project_dependents(
-            project_cache,
-            delphi_cache.as_deref_mut(),
-            &project_map,
-            new_unit,
-            &mut summary.warnings,
-        )?;
+        let mut needs_new_unit = false;
+        let mut insert_after = None;
+        if !has_new_unit {
+            if project_map.is_empty() {
+                continue;
+            }
 
-        let mut needs_update = false;
-        for entry in &list.entries {
-            let key = entry.name.to_ascii_lowercase();
-            if let Some(path) = project_map.get(&key) {
-                if let Some(&id) = dependents.id_by_path.get(path) {
-                    if dependents.dependents[id] {
-                        needs_update = true;
-                        break;
+            let dependents = compute_project_dependents(
+                project_cache,
+                delphi_cache.as_deref_mut(),
+                &project_map,
+                new_unit,
+                &mut summary.warnings,
+            )?;
+
+            for entry in &current_list.entries {
+                let key = entry.name.to_ascii_lowercase();
+                if let Some(path) = project_map.get(&key) {
+                    if let Some(&id) = dependents.id_by_path.get(path) {
+                        if dependents.dependents[id] {
+                            needs_new_unit = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if !needs_update {
-            continue;
-        }
-
-        let insert_after = find_direct_introducer_index(&list, &project_map, &dependents);
-        let updated = match insert_new_unit(&bytes, path, &list, new_unit, insert_after) {
-            Ok(value) => value,
-            Err(err) => {
-                summary.warnings.push(format!(
-                    "warning: failed to update dpr {}: {err}",
-                    path.display()
-                ));
-                summary.failures += 1;
+            if !needs_new_unit {
                 continue;
             }
-        };
-        if updated {
+            insert_after = find_direct_introducer_index(&current_list, &project_map, &dependents);
+        }
+
+        let mut dpr_updated = false;
+        let mut last_inserted_name = None;
+
+        if needs_new_unit {
+            let updated = match insert_new_unit(
+                &current_bytes,
+                path,
+                &current_list,
+                new_unit,
+                insert_after,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    summary.warnings.push(format!(
+                        "warning: failed to update dpr {}: {err}",
+                        path.display()
+                    ));
+                    summary.failures += 1;
+                    continue;
+                }
+            };
+            if updated {
+                dpr_updated = true;
+                last_inserted_name = Some(new_unit.name.clone());
+                let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        summary
+                            .warnings
+                            .push(format!("warning: no uses list found in {}", path.display()));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to read dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                current_bytes = reloaded.0;
+                current_list = reloaded.1;
+            }
+        }
+
+        if add_introduced_dependencies && (needs_new_unit || has_new_unit) {
+            let introduced = collect_introduced_dependencies(
+                project_cache,
+                delphi_cache.as_deref_mut(),
+                &project_map,
+                new_unit,
+                &mut summary.warnings,
+            )?;
+            if has_new_unit && last_inserted_name.is_none() {
+                last_inserted_name = Some(new_unit.name.clone());
+            }
+
+            for dep_unit in introduced {
+                if current_list
+                    .entries
+                    .iter()
+                    .any(|entry| entry.name.eq_ignore_ascii_case(&dep_unit.name))
+                {
+                    continue;
+                }
+
+                let dep_insert_after = last_inserted_name.as_ref().and_then(|name| {
+                    current_list.entries.iter().position(|entry| {
+                        !entry.from_include && entry.name.eq_ignore_ascii_case(name)
+                    })
+                });
+                let dep_updated = match insert_new_unit(
+                    &current_bytes,
+                    path,
+                    &current_list,
+                    &dep_unit,
+                    dep_insert_after,
+                ) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to update dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                if !dep_updated {
+                    continue;
+                }
+
+                dpr_updated = true;
+                last_inserted_name = Some(dep_unit.name);
+                let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        summary
+                            .warnings
+                            .push(format!("warning: no uses list found in {}", path.display()));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to read dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                current_bytes = reloaded.0;
+                current_list = reloaded.1;
+            }
+        }
+
+        if dpr_updated {
             summary.updated += 1;
             summary.updated_paths.push(path.clone());
         }
     }
 
     Ok(summary)
+}
+
+fn reload_dpr_state(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> io::Result<Option<(Vec<u8>, UsesList)>> {
+    let bytes = fs::read(path)?;
+    let list = parse_dpr_uses(path, &bytes, warnings);
+    Ok(list.map(|list| (bytes, list)))
 }
 
 fn find_direct_introducer_index(
@@ -459,6 +580,77 @@ fn load_unit_uses(
     }
 
     Ok(unit_cache::load_unit_file(&canonical, warnings)?.map(|info| info.uses))
+}
+
+fn collect_introduced_dependencies(
+    project_cache: &mut UnitCache,
+    mut delphi_cache: Option<&mut UnitCache>,
+    project_map: &HashMap<String, PathBuf>,
+    new_unit: &UnitFileInfo,
+    warnings: &mut Vec<String>,
+) -> io::Result<Vec<UnitFileInfo>> {
+    let mut queue = VecDeque::new();
+    let mut seen_paths = HashSet::new();
+    let mut seen_names = HashSet::new();
+    let mut introduced = Vec::new();
+
+    let root_path = unit_cache::canonicalize_if_exists(&new_unit.path);
+    seen_paths.insert(root_path.clone());
+    queue.push_back(root_path.clone());
+
+    while let Some(unit_path) = queue.pop_front() {
+        let uses = match load_unit_uses(
+            project_cache,
+            delphi_cache.as_deref_mut(),
+            &unit_path,
+            warnings,
+        )? {
+            Some(uses) => uses,
+            None => {
+                warnings.push(format!(
+                    "warning: failed to read unit at {}",
+                    unit_path.display()
+                ));
+                continue;
+            }
+        };
+
+        for dep in uses {
+            if dep.eq_ignore_ascii_case(&new_unit.name) {
+                continue;
+            }
+            let dep_path = resolve_dep_path(
+                project_map,
+                project_cache,
+                delphi_cache.as_deref(),
+                dep.as_str(),
+                unit_path.as_path(),
+                warnings,
+            );
+            let Some(dep_path) = dep_path else {
+                continue;
+            };
+            let dep_path = unit_cache::canonicalize_if_exists(&dep_path);
+            if dep_path == root_path {
+                continue;
+            }
+            if seen_paths.insert(dep_path.clone()) {
+                queue.push_back(dep_path.clone());
+            }
+
+            let dep_key = dep.to_ascii_lowercase();
+            if !seen_names.insert(dep_key) {
+                continue;
+            }
+            introduced.push(UnitFileInfo {
+                name: dep,
+                path: dep_path,
+                uses: Vec::new(),
+            });
+        }
+    }
+
+    Ok(introduced)
 }
 
 fn resolve_dpr_unit_path(dpr_path: &Path, raw: &str) -> PathBuf {
@@ -1249,6 +1441,52 @@ begin end.
             }
             _ => panic!("expected unique delphi resolution"),
         }
+    }
+
+    #[test]
+    fn collect_introduced_dependencies_returns_transitive_closure_without_root() {
+        let root = temp_dir();
+        let new_path = root.join("NewUnit.pas");
+        let mid_path = root.join("MidUnit.pas");
+        let base_path = root.join("BaseUnit.pas");
+        fs::write(
+            &new_path,
+            "unit NewUnit;\ninterface\nuses MidUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &mid_path,
+            "unit MidUnit;\ninterface\nuses BaseUnit, NewUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &base_path,
+            "unit BaseUnit;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let mut project_cache =
+            unit_cache::build_unit_cache(&[new_path.clone(), mid_path, base_path], &mut warnings)
+                .unwrap();
+        let new_unit = unit_cache::load_unit_file(&new_path, &mut warnings)
+            .unwrap()
+            .expect("new unit");
+        let project_map = HashMap::new();
+
+        let introduced = collect_introduced_dependencies(
+            &mut project_cache,
+            None,
+            &project_map,
+            &new_unit,
+            &mut warnings,
+        )
+        .unwrap();
+        let names: Vec<String> = introduced
+            .into_iter()
+            .map(|unit| unit.name.to_ascii_lowercase())
+            .collect();
+        assert_eq!(names, vec!["midunit", "baseunit"]);
     }
 
     fn temp_dir() -> PathBuf {

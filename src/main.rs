@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
     ignore_dpr: Vec<String>,
 
+    /// Disable adding transitive dependencies introduced by --new-dependency
+    #[arg(long)]
+    disable_introduced_dependencies: bool,
+
     /// Show detailed info list
     #[arg(long)]
     show_infos: bool,
@@ -214,6 +218,7 @@ fn main() {
         &mut unit_cache,
         delphi_unit_cache.as_mut(),
         &new_unit,
+        !cli.disable_introduced_dependencies,
     ) {
         Ok(summary) => summary,
         Err(err) => {
