@@ -21,25 +21,23 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--delphi
 
 ### Common arguments
 
-- `--search-path PATH`: Root directory to recursively scan for `.dpr` and `.pas`; can be repeated. Relative paths are resolved from the current working directory.
+- `--search-path PATH`: Required. Root directory to recursively scan for `.dpr` and `.pas`; can be repeated. Relative paths are resolved from the current working directory.
 - `--ignore-path PATH`: Optional directory to skip recursively; can be repeated. Relative paths are resolved from the current working directory.
 - `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated. Relative patterns are resolved from the current working directory, then matched against absolute `.dpr` paths.
 - `--show-infos`: Show detailed info messages.
 - `--show-warnings`: Show detailed warning messages.
+- `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
+- `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
 
 ### `add-dependency` arguments
 
 - `--new-dependency VALUE`: A `.pas` file path (absolute or relative to the current working directory).
-- `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
-- `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
 - `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `--new-dependency`; by default, these introduced dependencies are also inserted when needed.
 - `--fix-updated-dprs`: After `add-dependency` updates files, run `fix-dpr` behavior on each updated `.dpr` to add additional missing dependencies from the search-path unit cache.
 
 ### `fix-dpr` arguments
 
 - `--dpr-file FILE`: Target `.dpr` file to repair (absolute or relative to the current working directory).
-- `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
-- `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
 
 ## Examples
 
