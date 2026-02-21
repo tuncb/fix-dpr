@@ -47,10 +47,10 @@ struct AddDependencyArgs {
     delphi_version: Vec<String>,
 
     /// Path to a .pas file (absolute or relative to the current directory)
-    #[arg(long, value_name = "VALUE")]
+    #[arg(value_name = "NEW_DEPENDENCY")]
     new_dependency: String,
 
-    /// Disable adding transitive dependencies introduced by --new-dependency
+    /// Disable adding transitive dependencies introduced by NEW_DEPENDENCY
     #[arg(long)]
     disable_introduced_dependencies: bool,
 
@@ -73,7 +73,7 @@ struct FixDprArgs {
     delphi_version: Vec<String>,
 
     /// Path to the target .dpr file to repair (absolute or relative to the current directory)
-    #[arg(long, value_name = "FILE")]
+    #[arg(value_name = "DPR_FILE")]
     dpr_file: String,
 }
 
@@ -343,7 +343,7 @@ fn run_fix_dpr(args: FixDprArgs) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
     };
-    if let Err(err) = validate_dpr_file_path(&target_dpr, "--dpr-file") {
+    if let Err(err) = validate_dpr_file_path(&target_dpr, "DPR_FILE") {
         exit_with_error(err, 2);
     }
     let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
@@ -392,7 +392,7 @@ fn run_fix_dpr(args: FixDprArgs) {
     if contains_path(&dpr_filter.ignored_files, &target_dpr) {
         exit_with_error(
             format!(
-                "--dpr-file is ignored by --ignore-dpr: {}",
+                "DPR_FILE is ignored by --ignore-dpr: {}",
                 target_dpr.display()
             ),
             2,
@@ -401,7 +401,7 @@ fn run_fix_dpr(args: FixDprArgs) {
     if !contains_path(&dpr_filter.included_files, &target_dpr) {
         exit_with_error(
             format!(
-                "--dpr-file not found under --search-path after ignore filters: {}",
+                "DPR_FILE not found under --search-path after ignore filters: {}",
                 target_dpr.display()
             ),
             2,
@@ -523,11 +523,11 @@ fn print_summary(summary: SummaryOutput<'_>) {
 }
 
 fn resolve_new_dependency_path(value: &str, cwd: &Path) -> Result<PathBuf, String> {
-    resolve_path_with_flag(value, cwd, "--new-dependency")
+    resolve_path_with_flag(value, cwd, "NEW_DEPENDENCY")
 }
 
 fn resolve_dpr_file_path(value: &str, cwd: &Path) -> Result<PathBuf, String> {
-    resolve_path_with_flag(value, cwd, "--dpr-file")
+    resolve_path_with_flag(value, cwd, "DPR_FILE")
 }
 
 fn resolve_path_with_flag(value: &str, cwd: &Path, flag_name: &str) -> Result<PathBuf, String> {
@@ -559,14 +559,11 @@ fn is_dpr_file(path: &Path) -> bool {
 
 fn validate_new_dependency_path(path: &Path) -> Result<(), String> {
     if !path.is_file() {
-        return Err(format!(
-            "--new-dependency path not found: {}",
-            path.display()
-        ));
+        return Err(format!("NEW_DEPENDENCY path not found: {}", path.display()));
     }
     if !is_pas_file(path) {
         return Err(format!(
-            "--new-dependency must point to a .pas file: {}",
+            "NEW_DEPENDENCY must point to a .pas file: {}",
             path.display()
         ));
     }
@@ -642,4 +639,45 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 fn exit_with_error(message: impl AsRef<str>, code: i32) -> ! {
     eprintln!("error: {}", message.as_ref());
     process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn parse_add_dependency_with_positional_new_dependency() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "add-dependency",
+            "--search-path",
+            ".",
+            "./common/NewUnit.pas",
+        ]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn reject_legacy_new_dependency_flag() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "add-dependency",
+            "--search-path",
+            ".",
+            "--new-dependency",
+            "./common/NewUnit.pas",
+        ]);
+
+        assert!(parsed.is_err(), "legacy flag should not parse");
+    }
+
+    #[test]
+    fn parse_fix_dpr_with_positional_dpr_file() {
+        let parsed =
+            Cli::try_parse_from(["fixdpr", "fix-dpr", "--search-path", ".", "./app1/App1.dpr"]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
 }
