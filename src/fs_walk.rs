@@ -62,6 +62,23 @@ pub fn canonicalize_root(root: &Path) -> PathBuf {
 }
 
 pub fn resolve_search_roots(raw_values: &[String], cwd: &Path) -> Result<Vec<PathBuf>, String> {
+    resolve_roots(raw_values, cwd, "--search-path", true)
+}
+
+pub fn resolve_optional_roots(
+    raw_values: &[String],
+    cwd: &Path,
+    flag_name: &str,
+) -> Result<Vec<PathBuf>, String> {
+    resolve_roots(raw_values, cwd, flag_name, false)
+}
+
+fn resolve_roots(
+    raw_values: &[String],
+    cwd: &Path,
+    flag_name: &str,
+    require_at_least_one: bool,
+) -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
 
@@ -79,13 +96,13 @@ pub fn resolve_search_roots(raw_values: &[String], cwd: &Path) -> Result<Vec<Pat
 
         if !absolute_path.exists() {
             return Err(format!(
-                "--search-path does not exist: {}",
+                "{flag_name} does not exist: {}",
                 absolute_path.display()
             ));
         }
         if !absolute_path.is_dir() {
             return Err(format!(
-                "--search-path is not a directory: {}",
+                "{flag_name} is not a directory: {}",
                 absolute_path.display()
             ));
         }
@@ -93,8 +110,8 @@ pub fn resolve_search_roots(raw_values: &[String], cwd: &Path) -> Result<Vec<Pat
         push_unique_root(&mut roots, &mut seen, &absolute_path);
     }
 
-    if roots.is_empty() {
-        return Err("--search-path must be provided at least once".to_string());
+    if require_at_least_one && roots.is_empty() {
+        return Err(format!("{flag_name} must be provided at least once"));
     }
 
     roots.sort_by_key(|path| normalize_path_for_prefix_match(path));
@@ -511,6 +528,23 @@ mod tests {
         let missing = root.join("missing").to_string_lossy().to_string();
         let err = resolve_search_roots(&[missing], &cwd).expect_err("should reject missing path");
         assert!(err.contains("--search-path does not exist"), "{err}");
+    }
+
+    #[test]
+    fn resolve_optional_roots_allows_empty_input() {
+        let cwd = temp_dir("fixdpr_optional_roots_empty_");
+        fs::create_dir_all(cwd.join("repo")).expect("create repo");
+        let resolved = resolve_optional_roots(&[], &cwd, "--delphi-path").expect("roots");
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn resolve_optional_roots_validates_flag_name_in_errors() {
+        let cwd = temp_dir("fixdpr_optional_roots_err_");
+        fs::create_dir_all(cwd.join("repo")).expect("create repo");
+        let err = resolve_optional_roots(&["repo/missing".to_string()], &cwd, "--delphi-path")
+            .expect_err("missing");
+        assert!(err.contains("--delphi-path does not exist"), "{err}");
     }
 
     #[test]

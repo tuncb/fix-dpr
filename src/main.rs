@@ -4,6 +4,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
+mod delphi;
 mod dpr_edit;
 mod fs_walk;
 mod pas_lex;
@@ -21,6 +22,14 @@ struct Cli {
     /// Root folder path to recursively scan for .dpr and .pas (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     search_path: Vec<String>,
+
+    /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    delphi_path: Vec<String>,
+
+    /// Optional Delphi version to resolve from registry and use as fallback source root (repeatable)
+    #[arg(long, value_name = "VERSION", action = clap::ArgAction::Append)]
+    delphi_version: Vec<String>,
 
     /// Path to a .pas file (absolute or relative to the current directory)
     #[arg(long, value_name = "VALUE")]
@@ -60,6 +69,23 @@ fn main() {
             process::exit(2);
         }
     };
+    let mut delphi_roots =
+        match fs_walk::resolve_optional_roots(&cli.delphi_path, &cwd, "--delphi-path") {
+            Ok(roots) => roots,
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(2);
+            }
+        };
+    let mut delphi_roots_from_version = match delphi::resolve_source_roots(&cli.delphi_version) {
+        Ok(roots) => roots,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(2);
+        }
+    };
+    delphi_roots.append(&mut delphi_roots_from_version);
+    delphi_roots = dedupe_paths(delphi_roots);
     let mut warnings = Vec::new();
     let new_dependency_path = match resolve_new_dependency_path(&cli.new_dependency, &cwd) {
         Ok(path) => path,
@@ -90,6 +116,16 @@ fn main() {
     println!("Scanning {} root(s):", search_roots.len());
     for root in &search_roots {
         println!("  {}", root.display());
+    }
+    if !delphi_roots.is_empty() {
+        println!("Delphi fallback roots ({}):", delphi_roots.len());
+        for root in &delphi_roots {
+            println!("  {}", root.display());
+        }
+    }
+    let delphi_version_display = format_ignore_paths(&cli.delphi_version);
+    if !delphi_version_display.is_empty() {
+        println!("Delphi version lookup: {}", delphi_version_display);
     }
     let ignore_display = format_ignore_paths(&cli.ignore_path);
     if !ignore_display.is_empty() {
@@ -125,6 +161,33 @@ fn main() {
         }
     };
     println!("Unit cache ready ({} units)", scan.pas_files.len());
+    let mut delphi_unit_cache = if delphi_roots.is_empty() {
+        None
+    } else {
+        println!("Scanning Delphi fallback roots...");
+        let delphi_scan =
+            match fs_walk::scan_files(&delphi_roots, &fs_walk::IgnoreMatcher::default()) {
+                Ok(result) => result,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    process::exit(1);
+                }
+            };
+        println!("Found {} fallback .pas", delphi_scan.pas_files.len());
+        println!("Building Delphi fallback unit cache...");
+        let cache = match unit_cache::build_unit_cache(&delphi_scan.pas_files, &mut warnings) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("error: {err}");
+                process::exit(1);
+            }
+        };
+        println!(
+            "Delphi fallback unit cache ready ({} units)",
+            cache.by_path.len()
+        );
+        Some(cache)
+    };
     let new_dependency_path = unit_cache::canonicalize_if_exists(&new_dependency_path);
     let new_unit = match unit_cache::load_unit_file(&new_dependency_path, &mut warnings) {
         Ok(Some(unit)) => unit,
@@ -146,14 +209,18 @@ fn main() {
         new_unit.path.display()
     );
     println!("Updating .dpr files... {}", dpr_filter.included_files.len());
-    let dpr_summary =
-        match dpr_edit::update_dpr_files(&dpr_filter.included_files, &mut unit_cache, &new_unit) {
-            Ok(summary) => summary,
-            Err(err) => {
-                eprintln!("error: {err}");
-                process::exit(1);
-            }
-        };
+    let dpr_summary = match dpr_edit::update_dpr_files(
+        &dpr_filter.included_files,
+        &mut unit_cache,
+        delphi_unit_cache.as_mut(),
+        &new_unit,
+    ) {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("error: {err}");
+            process::exit(1);
+        }
+    };
     warnings.extend(dpr_summary.warnings.iter().cloned());
 
     let unchanged = dpr_summary
@@ -257,4 +324,28 @@ fn display_path(path: &Path, roots: &[PathBuf]) -> String {
     }
 
     path.to_string_lossy().to_string()
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in paths {
+        let key = path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if seen.insert(key) {
+            deduped.push(path);
+        }
+    }
+
+    deduped.sort_by_key(|path| {
+        path.to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    });
+    deduped
 }

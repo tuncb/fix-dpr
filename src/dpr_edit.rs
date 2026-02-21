@@ -38,7 +38,8 @@ struct UsesList {
 
 pub fn update_dpr_files(
     dpr_paths: &[PathBuf],
-    unit_cache: &mut UnitCache,
+    project_cache: &mut UnitCache,
+    mut delphi_cache: Option<&mut UnitCache>,
     new_unit: &UnitFileInfo,
 ) -> io::Result<DprUpdateSummary> {
     let mut summary = DprUpdateSummary {
@@ -70,7 +71,13 @@ pub fn update_dpr_files(
             continue;
         };
 
-        let project_map = build_project_map(path, &list, unit_cache, &mut summary.warnings);
+        let project_map = build_project_map(
+            path,
+            &list,
+            project_cache,
+            delphi_cache.as_deref(),
+            &mut summary.warnings,
+        );
         if list
             .entries
             .iter()
@@ -82,8 +89,13 @@ pub fn update_dpr_files(
             continue;
         }
 
-        let dependents =
-            compute_project_dependents(unit_cache, &project_map, new_unit, &mut summary.warnings)?;
+        let dependents = compute_project_dependents(
+            project_cache,
+            delphi_cache.as_deref_mut(),
+            &project_map,
+            new_unit,
+            &mut summary.warnings,
+        )?;
 
         let mut needs_update = false;
         for entry in &list.entries {
@@ -152,29 +164,36 @@ struct ProjectDependents {
 fn build_project_map(
     dpr_path: &Path,
     list: &UsesList,
-    unit_cache: &UnitCache,
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
     warnings: &mut Vec<String>,
 ) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
 
     for entry in &list.entries {
         let Some(raw_path) = entry.in_path.as_ref() else {
-            match resolve_by_name(unit_cache, &entry.name) {
+            match resolve_by_name(project_cache, delphi_cache, &entry.name) {
                 ResolveByName::NotFound => {}
-                ResolveByName::Unique(fallback) => {
-                    warnings.push(format!(
-                        "warning: missing in-path for unit {} in {} (resolved via scan)",
-                        entry.name,
-                        dpr_path.display()
-                    ));
+                ResolveByName::Unique {
+                    path: fallback,
+                    source,
+                } => {
+                    if source == ResolutionSource::Project {
+                        warnings.push(format!(
+                            "warning: missing in-path for unit {} in {} (resolved via scan)",
+                            entry.name,
+                            dpr_path.display()
+                        ));
+                    }
                     insert_project_entry(&mut map, entry, fallback, dpr_path, warnings);
                 }
-                ResolveByName::Ambiguous(count) => {
+                ResolveByName::Ambiguous { count, source } => {
                     warnings.push(format!(
-                        "warning: missing in-path for unit {} in {} ({} matches)",
+                        "warning: missing in-path for unit {} in {} ({} {} matches)",
                         entry.name,
                         dpr_path.display(),
-                        count
+                        count,
+                        source_label(source)
                     ));
                 }
             }
@@ -189,16 +208,17 @@ fn build_project_map(
                 dpr_path.display(),
                 resolved.display()
             ));
-            match resolve_by_name(unit_cache, &entry.name) {
-                ResolveByName::Unique(fallback) => {
+            match resolve_by_name(project_cache, delphi_cache, &entry.name) {
+                ResolveByName::Unique { path: fallback, .. } => {
                     insert_project_entry(&mut map, entry, fallback, dpr_path, warnings);
                 }
-                ResolveByName::Ambiguous(count) => {
+                ResolveByName::Ambiguous { count, source } => {
                     warnings.push(format!(
-                        "warning: unit {} referenced in {} is ambiguous ({} matches)",
+                        "warning: unit {} referenced in {} is ambiguous ({} {} matches)",
                         entry.name,
                         dpr_path.display(),
-                        count
+                        count,
+                        source_label(source)
                     ));
                 }
                 ResolveByName::NotFound => {}
@@ -233,25 +253,71 @@ fn insert_project_entry(
     map.insert(key, resolved);
 }
 
-enum ResolveByName {
-    NotFound,
-    Unique(PathBuf),
-    Ambiguous(usize),
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ResolutionSource {
+    Project,
+    Delphi,
 }
 
-fn resolve_by_name(unit_cache: &UnitCache, unit_name: &str) -> ResolveByName {
+enum ResolveByName {
+    NotFound,
+    Unique {
+        path: PathBuf,
+        source: ResolutionSource,
+    },
+    Ambiguous {
+        count: usize,
+        source: ResolutionSource,
+    },
+}
+
+fn resolve_by_name(
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
+    unit_name: &str,
+) -> ResolveByName {
     let key = unit_name.to_ascii_lowercase();
-    let Some(paths) = unit_cache.by_name.get(&key) else {
-        return ResolveByName::NotFound;
-    };
-    if paths.len() > 1 {
-        return ResolveByName::Ambiguous(paths.len());
+    if let Some(paths) = project_cache.by_name.get(&key) {
+        if paths.len() > 1 {
+            return ResolveByName::Ambiguous {
+                count: paths.len(),
+                source: ResolutionSource::Project,
+            };
+        }
+        return ResolveByName::Unique {
+            path: paths[0].clone(),
+            source: ResolutionSource::Project,
+        };
     }
-    ResolveByName::Unique(paths[0].clone())
+
+    if let Some(delphi_cache) = delphi_cache {
+        if let Some(paths) = delphi_cache.by_name.get(&key) {
+            if paths.len() > 1 {
+                return ResolveByName::Ambiguous {
+                    count: paths.len(),
+                    source: ResolutionSource::Delphi,
+                };
+            }
+            return ResolveByName::Unique {
+                path: paths[0].clone(),
+                source: ResolutionSource::Delphi,
+            };
+        }
+    }
+
+    ResolveByName::NotFound
+}
+
+fn source_label(source: ResolutionSource) -> &'static str {
+    match source {
+        ResolutionSource::Project => "project",
+        ResolutionSource::Delphi => "--delphi-path",
+    }
 }
 
 fn compute_project_dependents(
-    unit_cache: &mut UnitCache,
+    project_cache: &mut UnitCache,
+    mut delphi_cache: Option<&mut UnitCache>,
     project_map: &HashMap<String, PathBuf>,
     new_unit: &UnitFileInfo,
     warnings: &mut Vec<String>,
@@ -273,15 +339,20 @@ fn compute_project_dependents(
     }
 
     while let Some(unit_path) = queue.pop_front() {
-        let uses = {
-            let Some(info) = unit_cache::get_or_load(unit_cache, &unit_path, warnings)? else {
+        let uses = match load_unit_uses(
+            project_cache,
+            delphi_cache.as_deref_mut(),
+            &unit_path,
+            warnings,
+        )? {
+            Some(uses) => uses,
+            None => {
                 warnings.push(format!(
                     "warning: failed to read unit at {}",
                     unit_path.display()
                 ));
                 continue;
-            };
-            info.uses.clone()
+            }
         };
         let Some(&source_id) = id_by_path.get(&unit_path) else {
             continue;
@@ -294,7 +365,8 @@ fn compute_project_dependents(
             }
             let dep_path = resolve_dep_path(
                 project_map,
-                unit_cache,
+                project_cache,
+                delphi_cache.as_deref(),
                 dep.as_str(),
                 unit_path.as_path(),
                 warnings,
@@ -343,7 +415,8 @@ fn compute_project_dependents(
 
 fn resolve_dep_path(
     project_map: &HashMap<String, PathBuf>,
-    unit_cache: &UnitCache,
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
     dep_name: &str,
     source_path: &Path,
     warnings: &mut Vec<String>,
@@ -352,19 +425,40 @@ fn resolve_dep_path(
     if let Some(path) = project_map.get(&dep_key) {
         return Some(path.clone());
     }
-    if let Some(paths) = unit_cache.by_name.get(&dep_key) {
-        if paths.len() == 1 {
-            return Some(paths[0].clone());
+    match resolve_by_name(project_cache, delphi_cache, dep_name) {
+        ResolveByName::Unique { path, .. } => Some(path),
+        ResolveByName::Ambiguous { count, source } => {
+            warnings.push(format!(
+                "warning: ambiguous unit {} referenced by {} ({} {} matches)",
+                dep_name,
+                source_path.display(),
+                count,
+                source_label(source)
+            ));
+            None
         }
-        warnings.push(format!(
-            "warning: ambiguous unit {} referenced by {} ({} matches)",
-            dep_name,
-            source_path.display(),
-            paths.len()
-        ));
-        return None;
+        ResolveByName::NotFound => None,
     }
-    None
+}
+
+fn load_unit_uses(
+    project_cache: &mut UnitCache,
+    delphi_cache: Option<&mut UnitCache>,
+    unit_path: &Path,
+    warnings: &mut Vec<String>,
+) -> io::Result<Option<Vec<String>>> {
+    let canonical = unit_cache::canonicalize_if_exists(unit_path);
+    if let Some(info) = project_cache.by_path.get(&canonical) {
+        return Ok(Some(info.uses.clone()));
+    }
+
+    if let Some(delphi_cache) = delphi_cache {
+        if let Some(info) = delphi_cache.by_path.get(&canonical) {
+            return Ok(Some(info.uses.clone()));
+        }
+    }
+
+    Ok(unit_cache::load_unit_file(&canonical, warnings)?.map(|info| info.uses))
 }
 
 fn resolve_dpr_unit_path(dpr_path: &Path, raw: &str) -> PathBuf {
@@ -1114,6 +1208,47 @@ begin end.
         assert_eq!(names, vec!["Foo", "Bar", "Baz", "Qux"]);
         assert!(list.has_backslash);
         assert!(list.has_slash);
+    }
+
+    #[test]
+    fn resolve_by_name_prefers_project_cache_before_delphi_cache() {
+        let mut project_cache = UnitCache::default();
+        let project_path = PathBuf::from(r"C:\project\Foo.pas");
+        project_cache
+            .by_name
+            .insert("foo".to_string(), vec![project_path.clone()]);
+
+        let mut delphi_cache = UnitCache::default();
+        let delphi_path = PathBuf::from(r"C:\delphi\Foo.pas");
+        delphi_cache
+            .by_name
+            .insert("foo".to_string(), vec![delphi_path.clone()]);
+
+        match resolve_by_name(&project_cache, Some(&delphi_cache), "Foo") {
+            ResolveByName::Unique { path, source } => {
+                assert_eq!(path, project_path);
+                assert_eq!(source, ResolutionSource::Project);
+            }
+            _ => panic!("expected unique project resolution"),
+        }
+    }
+
+    #[test]
+    fn resolve_by_name_uses_delphi_cache_when_project_missing() {
+        let project_cache = UnitCache::default();
+        let mut delphi_cache = UnitCache::default();
+        let delphi_path = PathBuf::from(r"C:\delphi\ExtUnit.pas");
+        delphi_cache
+            .by_name
+            .insert("extunit".to_string(), vec![delphi_path.clone()]);
+
+        match resolve_by_name(&project_cache, Some(&delphi_cache), "ExtUnit") {
+            ResolveByName::Unique { path, source } => {
+                assert_eq!(path, delphi_path);
+                assert_eq!(source, ResolutionSource::Delphi);
+            }
+            _ => panic!("expected unique delphi resolution"),
+        }
     }
 
     fn temp_dir() -> PathBuf {

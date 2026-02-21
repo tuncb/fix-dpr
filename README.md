@@ -8,7 +8,7 @@ list that already references a unit that depends on it.
 ## Usage
 
 ```
-fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--ignore-path PATH] [--ignore-dpr GLOB]
+fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB]
 ```
 
 ### Arguments
@@ -18,6 +18,12 @@ fixdpr --search-path PATH [--search-path PATH] --new-dependency VALUE [--ignore-
   directory.
 - `--new-dependency VALUE`: A `.pas` file path (absolute or relative to the
   current working directory).
+- `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units;
+  can be repeated. Units in these roots are used only for dependency
+  resolution fallback and are not scanned for `.dpr` updates.
+- `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from
+  Windows registry and use `<BDS Root>\source` as fallback roots; can be
+  repeated. Accepts both `22.0` and `22` forms.
 - `--ignore-path PATH`: Optional directory to skip recursively; can be repeated.
   Relative paths are resolved from the current working directory.
 - `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated.
@@ -41,6 +47,25 @@ fixdpr `
   --search-path .\repo\app1 `
   --search-path .\repo\app2 `
   --new-dependency .\repo\common\NewUnit.pas
+```
+
+Use Delphi source roots as fallback unit resolution:
+
+```powershell
+fixdpr `
+  --search-path .\repo `
+  --new-dependency C:\RADStudio\source\rtl\common\System.Net.HttpClient.pas `
+  --delphi-path C:\RADStudio\source\rtl\common `
+  --delphi-path C:\RADStudio\source\vcl
+```
+
+Resolve fallback roots directly from Delphi version:
+
+```powershell
+fixdpr `
+  --search-path .\repo `
+  --new-dependency C:\Program Files (x86)\Embarcadero\Studio\22.0\source\rtl\common\System.Net.HttpClient.pas `
+  --delphi-version 22.0
 ```
 
 Ignore one or more directories recursively:

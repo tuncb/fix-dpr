@@ -35,22 +35,6 @@ pub fn build_unit_cache(paths: &[PathBuf], warnings: &mut Vec<String>) -> io::Re
     Ok(cache)
 }
 
-pub fn get_or_load<'a>(
-    cache: &'a mut UnitCache,
-    path: &Path,
-    warnings: &mut Vec<String>,
-) -> io::Result<Option<&'a UnitFileInfo>> {
-    let canonical = canonicalize_if_exists(path);
-    if cache.by_path.contains_key(&canonical) {
-        return Ok(cache.by_path.get(&canonical));
-    }
-    if let Some(info) = load_unit_file(&canonical, warnings)? {
-        insert_unit(cache, canonical.clone(), info);
-        return Ok(cache.by_path.get(&canonical));
-    }
-    Ok(None)
-}
-
 pub fn load_unit_file(path: &Path, warnings: &mut Vec<String>) -> io::Result<Option<UnitFileInfo>> {
     let bytes = fs::read(path)?;
     let name = match determine_unit_name(path, &bytes, warnings) {

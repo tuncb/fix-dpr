@@ -402,6 +402,107 @@ fn end_to_end_relative_ignore_pattern_from_search_root_matches() {
     assert_eq!(app1_actual, app1_expected, "app1 should still be updated");
 }
 
+#[test]
+fn end_to_end_delphi_path_enables_transitive_external_resolution() {
+    let without_root = temp_dir("fixdpr_e2e_delphi_path_without_");
+    let without_project = without_root.join("project");
+    let without_delphi = without_root.join("delphi");
+    create_delphi_path_fixture(&without_project, &without_delphi);
+
+    let without_output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&without_project)
+        .arg("--new-dependency")
+        .arg(without_delphi.join("NewUnit.pas"))
+        .output()
+        .expect("run fixdpr without delphi path");
+
+    assert!(
+        without_output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&without_output.stdout),
+        String::from_utf8_lossy(&without_output.stderr)
+    );
+
+    let without_dpr = normalize_newlines(
+        fs::read_to_string(without_project.join("App.dpr")).expect("read dpr without delphi path"),
+    );
+    assert!(
+        !without_dpr.contains("NewUnit in "),
+        "dpr should stay unchanged without --delphi-path:\n{without_dpr}"
+    );
+
+    let with_root = temp_dir("fixdpr_e2e_delphi_path_with_");
+    let with_project = with_root.join("project");
+    let with_delphi = with_root.join("delphi");
+    create_delphi_path_fixture(&with_project, &with_delphi);
+
+    let with_output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&with_project)
+        .arg("--new-dependency")
+        .arg(with_delphi.join("NewUnit.pas"))
+        .arg("--delphi-path")
+        .arg(&with_delphi)
+        .output()
+        .expect("run fixdpr with delphi path");
+
+    assert!(
+        with_output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&with_output.stdout),
+        String::from_utf8_lossy(&with_output.stderr)
+    );
+
+    let with_dpr =
+        normalize_newlines(fs::read_to_string(with_project.join("App.dpr")).expect("read dpr"));
+    assert!(
+        with_dpr.contains("NewUnit in '..\\delphi\\NewUnit.pas'"),
+        "dpr should include NewUnit via transitive external dependency:\n{with_dpr}"
+    );
+}
+
+#[test]
+fn end_to_end_delphi_version_reports_error_for_unknown_version() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let temp_root = temp_dir("fixdpr_e2e_delphi_version_unknown_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .arg("--delphi-version")
+        .arg("9999.9999")
+        .output()
+        .expect("run fixdpr with invalid delphi version");
+
+    assert!(
+        !output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    #[cfg(windows)]
+    assert!(
+        stderr.contains("--delphi-version not found in registry"),
+        "{stderr}"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        stderr.contains("--delphi-version is only supported on Windows"),
+        "{stderr}"
+    );
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
     for entry in fs::read_dir(src).expect("read dir") {
@@ -429,4 +530,31 @@ fn temp_dir(prefix: &str) -> PathBuf {
 
 fn normalize_newlines(contents: String) -> String {
     contents.replace("\r\n", "\n")
+}
+
+fn create_delphi_path_fixture(project_root: &Path, delphi_root: &Path) {
+    fs::create_dir_all(project_root).expect("create project root");
+    fs::create_dir_all(delphi_root).expect("create delphi root");
+
+    fs::write(
+        project_root.join("App.dpr"),
+        "program App;\nuses\n  UnitA in 'UnitA.pas';\nbegin\nend.\n",
+    )
+    .expect("write App.dpr");
+    fs::write(
+        project_root.join("UnitA.pas"),
+        "unit UnitA;\ninterface\nuses ExtMid;\nimplementation\nend.\n",
+    )
+    .expect("write UnitA.pas");
+
+    fs::write(
+        delphi_root.join("ExtMid.pas"),
+        "unit ExtMid;\ninterface\nuses NewUnit;\nimplementation\nend.\n",
+    )
+    .expect("write ExtMid.pas");
+    fs::write(
+        delphi_root.join("NewUnit.pas"),
+        "unit NewUnit;\ninterface\nimplementation\nend.\n",
+    )
+    .expect("write NewUnit.pas");
 }
