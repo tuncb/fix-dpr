@@ -14,7 +14,7 @@ fixdpr add-dependency --search-path PATH [--search-path PATH] --new-dependency V
 ```
 
 ```powershell
-fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--ignore-path PATH] [--ignore-dpr GLOB] [--show-infos] [--show-warnings]
+fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--show-infos] [--show-warnings]
 ```
 
 ## Arguments
@@ -38,6 +38,8 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--ignore
 ### `fix-dpr` arguments
 
 - `--dpr-file FILE`: Target `.dpr` file to repair (absolute or relative to the current working directory).
+- `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
+- `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
 
 ## Examples
 
@@ -79,6 +81,7 @@ Repair one `.dpr` while honoring ignored paths/patterns:
 ```powershell
 fixdpr fix-dpr `
   --search-path .\repo `
+  --delphi-path C:\RADStudio\source\rtl\common `
   --dpr-file .\repo\app1\App1.dpr `
   --ignore-path .\repo\ignored `
   --ignore-dpr ".\repo\legacy\**\*.dpr"

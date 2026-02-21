@@ -64,6 +64,14 @@ struct FixDprArgs {
     #[command(flatten)]
     common: CommonArgs,
 
+    /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    delphi_path: Vec<String>,
+
+    /// Optional Delphi version to resolve from registry and use as fallback source root (repeatable)
+    #[arg(long, value_name = "VERSION", action = clap::ArgAction::Append)]
+    delphi_version: Vec<String>,
+
     /// Path to the target .dpr file to repair (absolute or relative to the current directory)
     #[arg(long, value_name = "FILE")]
     dpr_file: String,
@@ -254,17 +262,18 @@ fn run_add_dependency(args: AddDependencyArgs) {
         let mut fix_pass_failures = 0usize;
         let updated_paths = dpr_summary.updated_paths.clone();
         for dpr_path in &updated_paths {
-            let fix_summary = match dpr_edit::fix_dpr_file(dpr_path, &unit_cache) {
-                Ok(summary) => summary,
-                Err(err) => {
-                    warnings.push(format!(
-                        "warning: failed to run fix-dpr on {}: {err}",
-                        dpr_path.display()
-                    ));
-                    fix_pass_failures += 1;
-                    continue;
-                }
-            };
+            let fix_summary =
+                match dpr_edit::fix_dpr_file(dpr_path, &unit_cache, delphi_unit_cache.as_ref()) {
+                    Ok(summary) => summary,
+                    Err(err) => {
+                        warnings.push(format!(
+                            "warning: failed to run fix-dpr on {}: {err}",
+                            dpr_path.display()
+                        ));
+                        fix_pass_failures += 1;
+                        continue;
+                    }
+                };
             fix_pass_scanned += fix_summary.scanned;
             fix_pass_updated += fix_summary.updated;
             fix_pass_failures += fix_summary.failures;
@@ -310,6 +319,17 @@ fn run_fix_dpr(args: FixDprArgs) {
         Ok(roots) => roots,
         Err(err) => exit_with_error(err, 2),
     };
+    let mut delphi_roots =
+        match fs_walk::resolve_optional_roots(&args.delphi_path, &cwd, "--delphi-path") {
+            Ok(roots) => roots,
+            Err(err) => exit_with_error(err, 2),
+        };
+    let mut delphi_roots_from_version = match delphi::resolve_source_roots(&args.delphi_version) {
+        Ok(roots) => roots,
+        Err(err) => exit_with_error(err, 2),
+    };
+    delphi_roots.append(&mut delphi_roots_from_version);
+    delphi_roots = dedupe_paths(delphi_roots);
     let ignore_matcher = match fs_walk::build_ignore_matcher(&args.common.ignore_path, &cwd) {
         Ok(matcher) => matcher,
         Err(err) => exit_with_error(err, 2),
@@ -334,6 +354,16 @@ fn run_fix_dpr(args: FixDprArgs) {
     println!("Scanning {} root(s):", search_roots.len());
     for root in &search_roots {
         println!("  {}", root.display());
+    }
+    if !delphi_roots.is_empty() {
+        println!("Delphi fallback roots ({}):", delphi_roots.len());
+        for root in &delphi_roots {
+            println!("  {}", root.display());
+        }
+    }
+    let delphi_version_display = format_values(&args.delphi_version);
+    if !delphi_version_display.is_empty() {
+        println!("Delphi version lookup: {}", delphi_version_display);
     }
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
@@ -385,12 +415,34 @@ fn run_fix_dpr(args: FixDprArgs) {
         Err(err) => exit_with_error(err.to_string(), 1),
     };
     println!("Unit cache ready ({} units)", scan.pas_files.len());
+    let delphi_unit_cache = if delphi_roots.is_empty() {
+        None
+    } else {
+        println!("Scanning Delphi fallback roots...");
+        let delphi_scan =
+            match fs_walk::scan_files(&delphi_roots, &fs_walk::IgnoreMatcher::default()) {
+                Ok(result) => result,
+                Err(err) => exit_with_error(err.to_string(), 1),
+            };
+        println!("Found {} fallback .pas", delphi_scan.pas_files.len());
+        println!("Building Delphi fallback unit cache...");
+        let cache = match unit_cache::build_unit_cache(&delphi_scan.pas_files, &mut warnings) {
+            Ok(result) => result,
+            Err(err) => exit_with_error(err.to_string(), 1),
+        };
+        println!(
+            "Delphi fallback unit cache ready ({} units)",
+            cache.by_path.len()
+        );
+        Some(cache)
+    };
     println!("Repairing target dpr...");
 
-    let dpr_summary = match dpr_edit::fix_dpr_file(&target_dpr, &unit_cache) {
-        Ok(summary) => summary,
-        Err(err) => exit_with_error(err.to_string(), 1),
-    };
+    let dpr_summary =
+        match dpr_edit::fix_dpr_file(&target_dpr, &unit_cache, delphi_unit_cache.as_ref()) {
+            Ok(summary) => summary,
+            Err(err) => exit_with_error(err.to_string(), 1),
+        };
     warnings.extend(dpr_summary.warnings.iter().cloned());
 
     print_summary(SummaryOutput {
