@@ -222,10 +222,12 @@ HKEY_CURRENT_USER\Software\Embarcadero\BDS\22.0
         let roots =
             resolve_source_roots_with_lookup(&versions, |version| Ok(lookup.get(version).cloned()))
                 .expect("resolve roots");
+        let bds22_source = PathBuf::from("bds22").join(SOURCE_DIR_NAME);
+        let bds23_source = PathBuf::from("bds23").join(SOURCE_DIR_NAME);
 
         assert_eq!(roots.len(), 2);
-        assert!(roots.iter().any(|path| path.ends_with("bds22\\source")));
-        assert!(roots.iter().any(|path| path.ends_with("bds23\\source")));
+        assert!(roots.iter().any(|path| path.ends_with(&bds22_source)));
+        assert!(roots.iter().any(|path| path.ends_with(&bds23_source)));
     }
 
     #[test]
