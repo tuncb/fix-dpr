@@ -595,6 +595,68 @@ fn end_to_end_disable_introduced_dependencies_flag_restores_single_insert_behavi
 }
 
 #[test]
+fn end_to_end_add_dependency_can_run_fix_dpr_on_updated_files() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("synthetic_expected");
+    let temp_root = temp_dir("fixdpr_e2e_add_then_fix_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--new-dependency")
+        .arg(&new_dependency)
+        .arg("--ignore-path")
+        .arg(temp_root.join("ignored"))
+        .arg("--fix-updated-dprs")
+        .output()
+        .expect("run fixdpr add-dependency with follow-up fix mode");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Running fix-dpr pass on updated dpr files"),
+        "{stdout}"
+    );
+
+    let app1 = normalize_newlines(
+        fs::read_to_string(temp_root.join("app1").join("App1.dpr")).expect("read app1"),
+    );
+    assert!(
+        app1.contains("UnitA in 'UnitA.pas'"),
+        "follow-up fix pass should add UnitA to app1:\n{app1}"
+    );
+    assert!(
+        app1.contains("NewUnit in '..\\common\\NewUnit.pas'"),
+        "app1 should still contain new dependency:\n{app1}"
+    );
+
+    let app2_actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app2").join("App2.dpr")).expect("read app2 actual"),
+    );
+    let app2_expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app2").join("App2.dpr"))
+            .expect("read app2 expected"),
+    );
+    assert_eq!(app2_actual, app2_expected, "app2 should remain unchanged");
+}
+
+#[test]
 fn end_to_end_fix_dpr_repairs_missing_chain_for_target_file() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root

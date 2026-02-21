@@ -10,7 +10,7 @@ It now supports two modes:
 ## Usage
 
 ```powershell
-fixdpr add-dependency --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--show-infos] [--show-warnings]
+fixdpr add-dependency --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
@@ -33,6 +33,7 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--ignore
 - `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
 - `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
 - `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `--new-dependency`; by default, these introduced dependencies are also inserted when needed.
+- `--fix-updated-dprs`: After `add-dependency` updates files, run `fix-dpr` behavior on each updated `.dpr` to add additional missing dependencies from the search-path unit cache.
 
 ### `fix-dpr` arguments
 
@@ -54,6 +55,15 @@ fixdpr add-dependency `
   --new-dependency C:\RADStudio\source\rtl\common\System.Net.HttpClient.pas `
   --delphi-path C:\RADStudio\source\rtl\common `
   --delphi-path C:\RADStudio\source\vcl
+```
+
+Add dependency and then run fix pass on all updated `.dpr` files:
+
+```powershell
+fixdpr add-dependency `
+  --search-path .\repo `
+  --new-dependency .\repo\common\NewUnit.pas `
+  --fix-updated-dprs
 ```
 
 Repair one `.dpr` by adding missing dependencies from search-path units:

@@ -53,6 +53,10 @@ struct AddDependencyArgs {
     /// Disable adding transitive dependencies introduced by --new-dependency
     #[arg(long)]
     disable_introduced_dependencies: bool,
+
+    /// Run a follow-up fix pass on each dpr updated by add-dependency
+    #[arg(long)]
+    fix_updated_dprs: bool,
 }
 
 #[derive(Args, Debug)]
@@ -228,7 +232,7 @@ fn run_add_dependency(args: AddDependencyArgs) {
     );
 
     println!("Updating .dpr files... {}", dpr_filter.included_files.len());
-    let dpr_summary = match dpr_edit::update_dpr_files(
+    let mut dpr_summary = match dpr_edit::update_dpr_files(
         &dpr_filter.included_files,
         &mut unit_cache,
         delphi_unit_cache.as_mut(),
@@ -239,6 +243,45 @@ fn run_add_dependency(args: AddDependencyArgs) {
         Err(err) => exit_with_error(err.to_string(), 1),
     };
     warnings.extend(dpr_summary.warnings.iter().cloned());
+
+    if args.fix_updated_dprs && !dpr_summary.updated_paths.is_empty() {
+        println!(
+            "Running fix-dpr pass on updated dpr files... {}",
+            dpr_summary.updated_paths.len()
+        );
+        let mut fix_pass_scanned = 0usize;
+        let mut fix_pass_updated = 0usize;
+        let mut fix_pass_failures = 0usize;
+        let updated_paths = dpr_summary.updated_paths.clone();
+        for dpr_path in &updated_paths {
+            let fix_summary = match dpr_edit::fix_dpr_file(dpr_path, &unit_cache) {
+                Ok(summary) => summary,
+                Err(err) => {
+                    warnings.push(format!(
+                        "warning: failed to run fix-dpr on {}: {err}",
+                        dpr_path.display()
+                    ));
+                    fix_pass_failures += 1;
+                    continue;
+                }
+            };
+            fix_pass_scanned += fix_summary.scanned;
+            fix_pass_updated += fix_summary.updated;
+            fix_pass_failures += fix_summary.failures;
+            warnings.extend(fix_summary.warnings);
+            for path in fix_summary.updated_paths {
+                if !contains_path(&dpr_summary.updated_paths, &path) {
+                    dpr_summary.updated_paths.push(path);
+                }
+            }
+        }
+        dpr_summary.updated = dpr_summary.updated_paths.len();
+        dpr_summary.failures += fix_pass_failures;
+        println!(
+            "fix-dpr pass report: scanned {}, updated {}, failures {}",
+            fix_pass_scanned, fix_pass_updated, fix_pass_failures
+        );
+    }
 
     print_summary(SummaryOutput {
         infos: &infos,
