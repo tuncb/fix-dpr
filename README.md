@@ -10,11 +10,11 @@ It now supports two modes:
 ## Usage
 
 ```powershell
-fixdpr add-dependency --search-path PATH [--search-path PATH] --new-dependency VALUE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
+fixdpr add-dependency --search-path PATH [--search-path PATH] NEW_DEPENDENCY [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
-fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--show-infos] [--show-warnings]
+fixdpr fix-dpr --search-path PATH [--search-path PATH] DPR_FILE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--show-infos] [--show-warnings]
 ```
 
 ## Arguments
@@ -31,20 +31,20 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] --dpr-file FILE [--delphi
 
 ### `add-dependency` arguments
 
-- `--new-dependency VALUE`: A `.pas` file path (absolute or relative to the current working directory).
-- `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `--new-dependency`; by default, these introduced dependencies are also inserted when needed.
+- `NEW_DEPENDENCY`: A `.pas` file path (absolute or relative to the current working directory).
+- `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `NEW_DEPENDENCY`; by default, these introduced dependencies are also inserted when needed.
 - `--fix-updated-dprs`: After `add-dependency` updates files, run `fix-dpr` behavior on each updated `.dpr` to add additional missing dependencies from the search-path unit cache.
 
 ### `fix-dpr` arguments
 
-- `--dpr-file FILE`: Target `.dpr` file to repair (absolute or relative to the current working directory).
+- `DPR_FILE`: Target `.dpr` file to repair (absolute or relative to the current working directory).
 
 ## Examples
 
 Add a new dependency for all matching `.dpr` files:
 
 ```powershell
-fixdpr add-dependency --search-path .\repo --new-dependency .\repo\common\NewUnit.pas
+fixdpr add-dependency --search-path .\repo .\repo\common\NewUnit.pas
 ```
 
 Add dependency using Delphi fallback roots:
@@ -52,7 +52,7 @@ Add dependency using Delphi fallback roots:
 ```powershell
 fixdpr add-dependency `
   --search-path .\repo `
-  --new-dependency C:\RADStudio\source\rtl\common\System.Net.HttpClient.pas `
+  C:\RADStudio\source\rtl\common\System.Net.HttpClient.pas `
   --delphi-path C:\RADStudio\source\rtl\common `
   --delphi-path C:\RADStudio\source\vcl
 ```
@@ -62,7 +62,7 @@ Add dependency and then run fix pass on all updated `.dpr` files:
 ```powershell
 fixdpr add-dependency `
   --search-path .\repo `
-  --new-dependency .\repo\common\NewUnit.pas `
+  .\repo\common\NewUnit.pas `
   --fix-updated-dprs
 ```
 
@@ -71,7 +71,7 @@ Repair one `.dpr` by adding missing dependencies from search-path units:
 ```powershell
 fixdpr fix-dpr `
   --search-path .\repo `
-  --dpr-file .\repo\app1\App1.dpr
+  .\repo\app1\App1.dpr
 ```
 
 Repair one `.dpr` while honoring ignored paths/patterns:
@@ -80,7 +80,7 @@ Repair one `.dpr` while honoring ignored paths/patterns:
 fixdpr fix-dpr `
   --search-path .\repo `
   --delphi-path C:\RADStudio\source\rtl\common `
-  --dpr-file .\repo\app1\App1.dpr `
+  .\repo\app1\App1.dpr `
   --ignore-path .\repo\ignored `
   --ignore-dpr ".\repo\legacy\**\*.dpr"
 ```

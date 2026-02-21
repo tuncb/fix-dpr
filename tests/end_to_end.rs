@@ -19,7 +19,6 @@ fn end_to_end_updates_expected_dprs() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -81,7 +80,6 @@ fn end_to_end_search_path_can_be_repeated_for_multiple_roots() {
         .arg(temp_root.join("app1"))
         .arg("--search-path")
         .arg(temp_root.join("app2"))
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .output()
         .expect("run fixdpr");
@@ -149,7 +147,6 @@ fn end_to_end_search_path_dedupes_overlapping_roots() {
         .arg(&temp_root)
         .arg("--search-path")
         .arg(temp_root.join("app1"))
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -222,7 +219,6 @@ fn end_to_end_search_path_requires_existing_directory() {
         .arg(&matched_root)
         .arg("--search-path")
         .arg(&missing_path)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .output()
         .expect("run fixdpr");
@@ -259,7 +255,6 @@ fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
         .current_dir(&repo_root)
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -319,7 +314,6 @@ fn end_to_end_relative_ignore_pattern_from_repo_root_does_not_match_temp_repo() 
         .current_dir(&repo_root)
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -370,7 +364,6 @@ fn end_to_end_relative_ignore_pattern_from_search_root_matches() {
         .current_dir(&temp_root)
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg("ignored")
@@ -420,7 +413,6 @@ fn end_to_end_delphi_path_enables_transitive_external_resolution() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&without_project)
-        .arg("--new-dependency")
         .arg(without_delphi.join("NewUnit.pas"))
         .output()
         .expect("run fixdpr without delphi path");
@@ -449,7 +441,6 @@ fn end_to_end_delphi_path_enables_transitive_external_resolution() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&with_project)
-        .arg("--new-dependency")
         .arg(with_delphi.join("NewUnit.pas"))
         .arg("--delphi-path")
         .arg(&with_delphi)
@@ -483,7 +474,6 @@ fn end_to_end_fix_dpr_delphi_path_enables_transitive_external_resolution() {
         .arg("fix-dpr")
         .arg("--search-path")
         .arg(&without_project)
-        .arg("--dpr-file")
         .arg(&without_target)
         .output()
         .expect("run fixdpr fix-dpr without delphi path");
@@ -517,7 +507,6 @@ fn end_to_end_fix_dpr_delphi_path_enables_transitive_external_resolution() {
         .arg("fix-dpr")
         .arg("--search-path")
         .arg(&with_project)
-        .arg("--dpr-file")
         .arg(&with_target)
         .arg("--delphi-path")
         .arg(&with_delphi)
@@ -557,7 +546,6 @@ fn end_to_end_delphi_version_reports_error_for_unknown_version() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--delphi-version")
         .arg("9999.9999")
@@ -599,7 +587,6 @@ fn end_to_end_fix_dpr_delphi_version_reports_error_for_unknown_version() {
         .arg("fix-dpr")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--dpr-file")
         .arg(&target_dpr)
         .arg("--delphi-version")
         .arg("9999.9999")
@@ -637,7 +624,6 @@ fn end_to_end_adds_introduced_dependencies_by_default() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&root)
-        .arg("--new-dependency")
         .arg(shared_root.join("NewUnit.pas"))
         .output()
         .expect("run fixdpr with introduced dependencies enabled");
@@ -677,7 +663,6 @@ fn end_to_end_disable_introduced_dependencies_flag_restores_single_insert_behavi
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&root)
-        .arg("--new-dependency")
         .arg(shared_root.join("NewUnit.pas"))
         .arg("--disable-introduced-dependencies")
         .output()
@@ -726,7 +711,6 @@ fn end_to_end_add_dependency_can_run_fix_dpr_on_updated_files() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--new-dependency")
         .arg(&new_dependency)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -784,7 +768,6 @@ fn end_to_end_fix_dpr_repairs_missing_chain_for_target_file() {
         .arg("fix-dpr")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--dpr-file")
         .arg(&target_dpr)
         .arg("--ignore-path")
         .arg(temp_root.join("ignored"))
@@ -837,7 +820,6 @@ fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
         .arg("fix-dpr")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--dpr-file")
         .arg(&target_dpr)
         .arg("--ignore-dpr")
         .arg(&target_dpr)
@@ -853,7 +835,7 @@ fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--dpr-file is ignored by --ignore-dpr"),
+        stderr.contains("DPR_FILE is ignored by --ignore-dpr"),
         "{stderr}"
     );
 }
