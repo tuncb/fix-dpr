@@ -840,6 +840,93 @@ fn end_to_end_fix_dpr_rejects_ignore_dpr_flag() {
     );
 }
 
+#[test]
+fn end_to_end_insert_dependency_targets_path_and_creates_uses_section() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root.join("tests").join("fixtures").join("insert_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("insert_expected_target_path");
+    let temp_root = temp_dir("fixdpr_e2e_insert_target_path_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("insert-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--target-path")
+        .arg(temp_root.join("apps"))
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr insert-dependency with target path");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected_files = [
+        PathBuf::from("apps").join("NoUses").join("AppNoUses.dpr"),
+        PathBuf::from("apps").join("HasUses").join("AppHasUses.dpr"),
+        PathBuf::from("other").join("ExplicitOnly.dpr"),
+    ];
+    for rel_path in expected_files {
+        let actual = normalize_newlines(
+            fs::read_to_string(temp_root.join(&rel_path))
+                .unwrap_or_else(|_| panic!("missing actual file: {}", rel_path.display())),
+        );
+        let expected = normalize_newlines(
+            fs::read_to_string(expected_root.join(&rel_path))
+                .unwrap_or_else(|_| panic!("missing expected file: {}", rel_path.display())),
+        );
+        assert_eq!(actual, expected, "mismatch for {}", rel_path.display());
+    }
+}
+
+#[test]
+fn end_to_end_insert_dependency_targets_explicit_dpr_file() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root.join("tests").join("fixtures").join("insert_repo");
+    let temp_root = temp_dir("fixdpr_e2e_insert_target_dpr_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let target_dpr = temp_root.join("other").join("ExplicitOnly.dpr");
+    let new_dependency = temp_root.join("common").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("insert-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--target-dpr")
+        .arg(&target_dpr)
+        .arg("--disable-introduced-dependencies")
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr insert-dependency with target dpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let explicit = normalize_newlines(fs::read_to_string(&target_dpr).expect("read target dpr"));
+    assert!(
+        explicit.contains("uses\n  NewUnit in '..\\common\\NewUnit.pas';"),
+        "{explicit}"
+    );
+
+    let untouched = normalize_newlines(
+        fs::read_to_string(temp_root.join("apps").join("NoUses").join("AppNoUses.dpr"))
+            .expect("read untouched dpr"),
+    );
+    assert_eq!(untouched, "program AppNoUses;\nbegin\nend.\n");
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
     for entry in fs::read_dir(src).expect("read dir") {

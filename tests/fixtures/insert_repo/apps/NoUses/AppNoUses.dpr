@@ -1,0 +1,3 @@
+program AppNoUses;
+begin
+end.

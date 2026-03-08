@@ -7,4 +7,4 @@ After we change the behavior of the application:
   - If the behavior change can be checked using file output add a test in one or more of the end2end tests under tests\fixtures folder.
   - If the behavior change does not change file output but just the output to stdout of the app, run the app to examine the command output to make sure the changes are correct.
 
-After we change command line parameters update the readme.md
+After we change command line parameters update the readme.md. Put the positional argument first in the examples argument order.

@@ -247,6 +247,308 @@ pub fn update_dpr_files(
     Ok(summary)
 }
 
+pub fn insert_dependency_files(
+    dpr_paths: &[PathBuf],
+    project_cache: &mut UnitCache,
+    mut delphi_cache: Option<&mut UnitCache>,
+    new_unit: &UnitFileInfo,
+    add_introduced_dependencies: bool,
+) -> io::Result<DprUpdateSummary> {
+    let mut summary = DprUpdateSummary {
+        scanned: 0,
+        updated: 0,
+        updated_paths: Vec::new(),
+        warnings: Vec::new(),
+        failures: 0,
+    };
+
+    'dpr_loop: for path in dpr_paths {
+        summary.scanned += 1;
+        let bytes = match fs::read(path) {
+            Ok(data) => data,
+            Err(err) => {
+                summary.warnings.push(format!(
+                    "warning: failed to read dpr {}: {err}",
+                    path.display()
+                ));
+                summary.failures += 1;
+                continue;
+            }
+        };
+
+        let mut current_bytes = bytes;
+        let parsed_list = parse_dpr_uses(path, &current_bytes, &mut summary.warnings);
+        let mut current_list = match parsed_list {
+            Some(list) => list,
+            None => {
+                if dpr_has_uses_keyword(&current_bytes) {
+                    summary.warnings.push(format!(
+                        "warning: failed to parse existing uses list in {}",
+                        path.display()
+                    ));
+                    summary.failures += 1;
+                    continue;
+                }
+
+                let created =
+                    match create_uses_section(&current_bytes, path, std::slice::from_ref(new_unit))
+                    {
+                        Ok(value) => value,
+                        Err(err) => {
+                            summary.warnings.push(format!(
+                                "warning: failed to create uses section in {}: {err}",
+                                path.display()
+                            ));
+                            summary.failures += 1;
+                            continue;
+                        }
+                    };
+                if !created {
+                    continue;
+                }
+
+                let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        summary
+                            .warnings
+                            .push(format!("warning: no uses list found in {}", path.display()));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to read dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                current_bytes = reloaded.0;
+                let mut current_list = reloaded.1;
+                let mut dpr_updated = true;
+                let mut last_inserted_name = Some(new_unit.name.clone());
+
+                if add_introduced_dependencies {
+                    let project_map = build_project_map(
+                        path,
+                        &current_list,
+                        project_cache,
+                        delphi_cache.as_deref(),
+                        &mut summary.warnings,
+                    );
+                    let introduced = collect_introduced_dependencies(
+                        project_cache,
+                        delphi_cache.as_deref_mut(),
+                        &project_map,
+                        new_unit,
+                        &mut summary.warnings,
+                    )?;
+
+                    for dep_unit in introduced {
+                        if current_list
+                            .entries
+                            .iter()
+                            .any(|entry| entry.name.eq_ignore_ascii_case(&dep_unit.name))
+                        {
+                            continue;
+                        }
+
+                        let dep_insert_after = last_inserted_name.as_ref().and_then(|name| {
+                            current_list.entries.iter().position(|entry| {
+                                !entry.from_include && entry.name.eq_ignore_ascii_case(name)
+                            })
+                        });
+                        let dep_updated = match insert_new_unit(
+                            &current_bytes,
+                            path,
+                            &current_list,
+                            &dep_unit,
+                            dep_insert_after,
+                        ) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                summary.warnings.push(format!(
+                                    "warning: failed to update dpr {}: {err}",
+                                    path.display()
+                                ));
+                                summary.failures += 1;
+                                continue 'dpr_loop;
+                            }
+                        };
+                        if !dep_updated {
+                            continue;
+                        }
+
+                        dpr_updated = true;
+                        last_inserted_name = Some(dep_unit.name);
+                        let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                            Ok(Some(value)) => value,
+                            Ok(None) => {
+                                summary.warnings.push(format!(
+                                    "warning: no uses list found in {}",
+                                    path.display()
+                                ));
+                                summary.failures += 1;
+                                continue 'dpr_loop;
+                            }
+                            Err(err) => {
+                                summary.warnings.push(format!(
+                                    "warning: failed to read dpr {}: {err}",
+                                    path.display()
+                                ));
+                                summary.failures += 1;
+                                continue 'dpr_loop;
+                            }
+                        };
+                        current_bytes = reloaded.0;
+                        current_list = reloaded.1;
+                    }
+                }
+
+                if dpr_updated {
+                    summary.updated += 1;
+                    summary.updated_paths.push(path.clone());
+                }
+                continue;
+            }
+        };
+
+        let mut dpr_updated = false;
+        let has_new_unit = current_list
+            .entries
+            .iter()
+            .any(|entry| entry.name.eq_ignore_ascii_case(&new_unit.name));
+        let mut last_inserted_name = None;
+
+        if !has_new_unit {
+            let updated = match insert_new_unit(&current_bytes, path, &current_list, new_unit, None)
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    summary.warnings.push(format!(
+                        "warning: failed to update dpr {}: {err}",
+                        path.display()
+                    ));
+                    summary.failures += 1;
+                    continue;
+                }
+            };
+            if updated {
+                dpr_updated = true;
+                last_inserted_name = Some(new_unit.name.clone());
+                let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        summary
+                            .warnings
+                            .push(format!("warning: no uses list found in {}", path.display()));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to read dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                current_bytes = reloaded.0;
+                current_list = reloaded.1;
+            }
+        }
+
+        if add_introduced_dependencies && (dpr_updated || has_new_unit) {
+            let project_map = build_project_map(
+                path,
+                &current_list,
+                project_cache,
+                delphi_cache.as_deref(),
+                &mut summary.warnings,
+            );
+            let introduced = collect_introduced_dependencies(
+                project_cache,
+                delphi_cache.as_deref_mut(),
+                &project_map,
+                new_unit,
+                &mut summary.warnings,
+            )?;
+            if has_new_unit && last_inserted_name.is_none() {
+                last_inserted_name = Some(new_unit.name.clone());
+            }
+
+            for dep_unit in introduced {
+                if current_list
+                    .entries
+                    .iter()
+                    .any(|entry| entry.name.eq_ignore_ascii_case(&dep_unit.name))
+                {
+                    continue;
+                }
+
+                let dep_insert_after = last_inserted_name.as_ref().and_then(|name| {
+                    current_list.entries.iter().position(|entry| {
+                        !entry.from_include && entry.name.eq_ignore_ascii_case(name)
+                    })
+                });
+                let dep_updated = match insert_new_unit(
+                    &current_bytes,
+                    path,
+                    &current_list,
+                    &dep_unit,
+                    dep_insert_after,
+                ) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to update dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                if !dep_updated {
+                    continue;
+                }
+
+                dpr_updated = true;
+                last_inserted_name = Some(dep_unit.name);
+                let reloaded = match reload_dpr_state(path, &mut summary.warnings) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        summary
+                            .warnings
+                            .push(format!("warning: no uses list found in {}", path.display()));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                    Err(err) => {
+                        summary.warnings.push(format!(
+                            "warning: failed to read dpr {}: {err}",
+                            path.display()
+                        ));
+                        summary.failures += 1;
+                        continue 'dpr_loop;
+                    }
+                };
+                current_bytes = reloaded.0;
+                current_list = reloaded.1;
+            }
+        }
+
+        if dpr_updated {
+            summary.updated += 1;
+            summary.updated_paths.push(path.clone());
+        }
+    }
+
+    Ok(summary)
+}
+
 pub fn fix_dpr_file(
     dpr_path: &Path,
     project_cache: &UnitCache,
@@ -925,7 +1227,6 @@ fn insert_new_unit(
     new_unit: &UnitFileInfo,
     insert_after: Option<usize>,
 ) -> io::Result<bool> {
-    let rel_path = relative_path(&new_unit.path, dpr_path.parent());
     let separator = if list.has_backslash {
         '\\'
     } else if list.has_slash {
@@ -933,9 +1234,7 @@ fn insert_new_unit(
     } else {
         '\\'
     };
-    let separator_str = separator.to_string();
-    let rel_path = rel_path.replace(['\\', '/'], &separator_str);
-    let entry_text = format!("{} in '{}'", new_unit.name, rel_path);
+    let entry_text = format_unit_entry(dpr_path, new_unit, separator);
 
     if let Some(idx) = insert_after {
         if let Some((insert_at, insert_bytes)) =
@@ -986,6 +1285,127 @@ fn insert_new_unit(
 
     write_atomic(dpr_path, &output)?;
     Ok(true)
+}
+
+fn create_uses_section(bytes: &[u8], dpr_path: &Path, units: &[UnitFileInfo]) -> io::Result<bool> {
+    if units.is_empty() {
+        return Ok(false);
+    }
+
+    let header_semicolon = find_dpr_header_semicolon(bytes).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unable to locate program/library header in {}",
+                dpr_path.display()
+            ),
+        )
+    })?;
+    let line_ending = detect_line_ending(bytes);
+    let mut block = String::new();
+    block.push_str(line_ending);
+    block.push_str("uses");
+    block.push_str(line_ending);
+    for (idx, unit) in units.iter().enumerate() {
+        block.push_str("  ");
+        block.push_str(&format_unit_entry(dpr_path, unit, '\\'));
+        if idx + 1 == units.len() {
+            block.push(';');
+        } else {
+            block.push(',');
+        }
+        block.push_str(line_ending);
+    }
+
+    let suffix = &bytes[header_semicolon + 1..];
+    let (suffix, removed_line_ending) = strip_one_leading_line_ending(suffix);
+    let mut output = Vec::with_capacity(bytes.len() + block.len() + line_ending.len());
+    output.extend_from_slice(&bytes[..header_semicolon + 1]);
+    output.extend_from_slice(block.as_bytes());
+    if !suffix.is_empty() && !removed_line_ending {
+        output.extend_from_slice(line_ending.as_bytes());
+    }
+    output.extend_from_slice(suffix);
+    write_atomic(dpr_path, &output)?;
+    Ok(true)
+}
+
+fn format_unit_entry(dpr_path: &Path, unit: &UnitFileInfo, separator: char) -> String {
+    let rel_path = relative_path(&unit.path, dpr_path.parent());
+    let separator_str = separator.to_string();
+    let rel_path = rel_path.replace(['\\', '/'], &separator_str);
+    format!("{} in '{}'", unit.name, rel_path)
+}
+
+fn strip_one_leading_line_ending(bytes: &[u8]) -> (&[u8], bool) {
+    if bytes.starts_with(b"\r\n") {
+        (&bytes[2..], true)
+    } else if bytes.first() == Some(&b'\n') || bytes.first() == Some(&b'\r') {
+        (&bytes[1..], true)
+    } else {
+        (bytes, false)
+    }
+}
+
+fn find_dpr_header_semicolon(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => i = pas_lex::skip_brace_comment(bytes, i + 1),
+            b'(' if bytes.get(i + 1) == Some(&b'*') => {
+                i = pas_lex::skip_paren_comment(bytes, i + 2)
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
+            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
+            byte if pas_lex::is_ident_start(byte) => {
+                let (token, next) = pas_lex::read_ident(bytes, i);
+                if token.eq_ignore_ascii_case("program") || token.eq_ignore_ascii_case("library") {
+                    let mut j = next;
+                    while j < bytes.len() {
+                        match bytes[j] {
+                            b';' => return Some(j),
+                            b'{' => j = pas_lex::skip_brace_comment(bytes, j + 1),
+                            b'(' if bytes.get(j + 1) == Some(&b'*') => {
+                                j = pas_lex::skip_paren_comment(bytes, j + 2)
+                            }
+                            b'/' if bytes.get(j + 1) == Some(&b'/') => {
+                                j = pas_lex::skip_line_comment(bytes, j + 2)
+                            }
+                            b'\'' => j = pas_lex::skip_string(bytes, j + 1),
+                            _ => j += 1,
+                        }
+                    }
+                    return None;
+                }
+                i = next;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn dpr_has_uses_keyword(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => i = pas_lex::skip_brace_comment(bytes, i + 1),
+            b'(' if bytes.get(i + 1) == Some(&b'*') => {
+                i = pas_lex::skip_paren_comment(bytes, i + 2)
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = pas_lex::skip_line_comment(bytes, i + 2),
+            b'\'' => i = pas_lex::skip_string(bytes, i + 1),
+            byte if pas_lex::is_ident_start(byte) => {
+                let (token, next) = pas_lex::read_ident(bytes, i);
+                if token.eq_ignore_ascii_case("uses") {
+                    return true;
+                }
+                i = next;
+            }
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn build_insertion_after(
@@ -1049,8 +1469,10 @@ fn separator_before_new_entry<'a>(
 }
 
 fn relative_path(target: &Path, base: Option<&Path>) -> String {
+    let target = unit_cache::canonicalize_if_exists(target);
     if let Some(base) = base {
-        if let Some(diff) = pathdiff::diff_paths(target, base) {
+        let base = unit_cache::canonicalize_if_exists(base);
+        if let Some(diff) = pathdiff::diff_paths(&target, &base) {
             return diff.to_string_lossy().to_string();
         }
     }
@@ -1861,6 +2283,83 @@ begin end.
         let updated = fs::read_to_string(&dpr_path).unwrap();
         assert!(updated.contains("ExtMid in "), "{updated}");
         assert!(updated.contains("NewUnit in "), "{updated}");
+    }
+
+    #[test]
+    fn create_uses_section_inserts_after_program_header() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let unit_path = root.join("NewUnit.pas");
+        fs::write(&dpr_path, "program App;\r\nbegin\r\nend.\r\n").unwrap();
+        fs::write(&unit_path, "unit NewUnit;\ninterface\nend.\n").unwrap();
+
+        let new_unit = UnitFileInfo {
+            name: "NewUnit".to_string(),
+            path: unit_path,
+            uses: Vec::new(),
+        };
+        let bytes = fs::read(&dpr_path).unwrap();
+        create_uses_section(&bytes, &dpr_path, std::slice::from_ref(&new_unit)).unwrap();
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(
+            updated.contains("program App;\r\nuses\r\n  NewUnit in 'NewUnit.pas';\r\nbegin"),
+            "{updated}"
+        );
+    }
+
+    #[test]
+    fn insert_dependency_files_creates_missing_uses_and_adds_chain() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let new_path = root.join("NewUnit.pas");
+        let mid_path = root.join("MidUnit.pas");
+        let base_path = root.join("BaseUnit.pas");
+        fs::write(&dpr_path, "program App;\nbegin\nend.\n").unwrap();
+        fs::write(
+            &new_path,
+            "unit NewUnit;\ninterface\nuses MidUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &mid_path,
+            "unit MidUnit;\ninterface\nuses BaseUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &base_path,
+            "unit BaseUnit;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let mut cache = unit_cache::build_unit_cache(
+            &[new_path.clone(), mid_path.clone(), base_path.clone()],
+            &mut warnings,
+        )
+        .unwrap();
+        let new_unit = unit_cache::load_unit_file(&new_path, &mut warnings)
+            .unwrap()
+            .expect("new unit");
+
+        let result = insert_dependency_files(
+            std::slice::from_ref(&dpr_path),
+            &mut cache,
+            None,
+            &new_unit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 1, "{result:?}");
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(
+            updated.contains("uses\n  NewUnit in 'NewUnit.pas',"),
+            "{updated}"
+        );
+        assert!(updated.contains("MidUnit in 'MidUnit.pas',"), "{updated}");
+        assert!(updated.contains("BaseUnit in 'BaseUnit.pas';"), "{updated}");
     }
 
     fn temp_dir() -> PathBuf {

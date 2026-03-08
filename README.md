@@ -2,19 +2,24 @@
 
 CLI tool that updates Delphi `.dpr` program files.
 
-It now supports two modes:
+It now supports three modes:
 
 - `add-dependency`: existing behavior. Add a given new unit to `.dpr` files that require it.
+- `insert-dependency`: insert a given new unit into selected `.dpr` files whether or not they currently depend on it, and optionally add that new unit's transitive dependency chain.
 - `fix-dpr`: new behavior. Repair one target `.dpr` by traversing dependency chains from its existing `uses` entries and adding missing units found in the scanned search-path unit cache.
 
 ## Usage
 
 ```powershell
-fixdpr add-dependency --search-path PATH [--search-path PATH] NEW_DEPENDENCY [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
+fixdpr add-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
-fixdpr fix-dpr --search-path PATH [--search-path PATH] DPR_FILE [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--show-infos] [--show-warnings]
+fixdpr insert-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] (--target-path PATH | --target-dpr DPR_FILE) [--target-path PATH] [--target-dpr DPR_FILE] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--disable-introduced-dependencies] [--show-infos] [--show-warnings]
+```
+
+```powershell
+fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--show-infos] [--show-warnings]
 ```
 
 ## Arguments
@@ -34,6 +39,14 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] DPR_FILE [--delphi-path P
 - `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated. Relative patterns are resolved from the current working directory, then matched against absolute `.dpr` paths.
 - `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `NEW_DEPENDENCY`; by default, these introduced dependencies are also inserted when needed.
 - `--fix-updated-dprs`: After `add-dependency` updates files, run `fix-dpr` behavior on each updated `.dpr` to add additional missing dependencies from the search-path unit cache.
+
+### `insert-dependency` arguments
+
+- `NEW_DEPENDENCY`: A `.pas` file path (absolute or relative to the current working directory).
+- `--target-path PATH`: Directory whose `.dpr` files should be updated recursively; can be repeated. Each target path must sit under one of the `--search-path` roots.
+- `--target-dpr DPR_FILE`: Exact `.dpr` file to update; can be repeated. Each target `.dpr` must sit under one of the `--search-path` roots.
+- `--ignore-dpr GLOB`: Optional `.dpr` glob pattern to ignore; can be repeated. Relative patterns are resolved from the current working directory, then matched against absolute `.dpr` paths.
+- `--disable-introduced-dependencies`: Disable inserting transitive dependencies referenced by `NEW_DEPENDENCY`; by default, these introduced dependencies are also inserted after the root dependency.
 
 ### `fix-dpr` arguments
 
@@ -55,6 +68,25 @@ fixdpr add-dependency `
   --search-path .\repo `
   --delphi-path C:\RADStudio\source\rtl\common `
   --delphi-path C:\RADStudio\source\vcl
+```
+
+Insert dependency into all application `.dpr` files under one subtree:
+
+```powershell
+fixdpr insert-dependency `
+  .\repo\common\NewUnit.pas `
+  --search-path .\repo `
+  --target-path .\repo\apps
+```
+
+Insert dependency into one explicit `.dpr` file:
+
+```powershell
+fixdpr insert-dependency `
+  .\repo\common\NewUnit.pas `
+  --search-path .\repo `
+  --target-dpr .\repo\special\LegacyApp.dpr `
+  --disable-introduced-dependencies
 ```
 
 Add dependency and then run fix pass on all updated `.dpr` files:
