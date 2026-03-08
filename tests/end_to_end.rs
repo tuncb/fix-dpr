@@ -806,7 +806,7 @@ fn end_to_end_fix_dpr_repairs_missing_chain_for_target_file() {
 }
 
 #[test]
-fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
+fn end_to_end_fix_dpr_rejects_ignore_dpr_flag() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
         .join("tests")
@@ -824,7 +824,7 @@ fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
         .arg("--ignore-dpr")
         .arg(&target_dpr)
         .output()
-        .expect("run fixdpr fix-dpr mode with ignored target");
+        .expect("run fixdpr fix-dpr mode with unsupported flag");
 
     assert!(
         !output.status.success(),
@@ -835,7 +835,7 @@ fn end_to_end_fix_dpr_rejects_target_ignored_by_pattern() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("DPR_FILE is ignored by --ignore-dpr"),
+        stderr.contains("unexpected argument '--ignore-dpr'"),
         "{stderr}"
     );
 }

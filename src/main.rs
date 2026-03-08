@@ -36,7 +36,10 @@ enum Commands {
 #[derive(Args, Debug)]
 struct AddDependencyArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: SharedArgs,
+
+    #[command(flatten)]
+    dpr_filter: AddDependencyDprFilterArgs,
 
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
@@ -62,7 +65,7 @@ struct AddDependencyArgs {
 #[derive(Args, Debug)]
 struct FixDprArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: SharedArgs,
 
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
@@ -78,7 +81,7 @@ struct FixDprArgs {
 }
 
 #[derive(Args, Debug)]
-struct CommonArgs {
+struct SharedArgs {
     /// Root folder path to recursively scan for .dpr and .pas (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     search_path: Vec<String>,
@@ -87,10 +90,6 @@ struct CommonArgs {
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     ignore_path: Vec<String>,
 
-    /// Optional glob pattern for .dpr files to ignore (repeatable)
-    #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
-    ignore_dpr: Vec<String>,
-
     /// Show detailed info list
     #[arg(long)]
     show_infos: bool,
@@ -98,6 +97,13 @@ struct CommonArgs {
     /// Show detailed warnings list
     #[arg(long)]
     show_warnings: bool,
+}
+
+#[derive(Args, Debug)]
+struct AddDependencyDprFilterArgs {
+    /// Optional glob pattern for .dpr files to ignore (repeatable)
+    #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
+    ignore_dpr: Vec<String>,
 }
 
 fn main() {
@@ -144,11 +150,11 @@ fn run_add_dependency(args: AddDependencyArgs) {
         Ok(matcher) => matcher,
         Err(err) => exit_with_error(err, 2),
     };
-    let ignore_dpr_matcher = match fs_walk::build_dpr_ignore_matcher(&args.common.ignore_dpr, &cwd)
-    {
-        Ok(matcher) => matcher,
-        Err(err) => exit_with_error(err, 2),
-    };
+    let ignore_dpr_matcher =
+        match fs_walk::build_dpr_ignore_matcher(&args.dpr_filter.ignore_dpr, &cwd) {
+            Ok(matcher) => matcher,
+            Err(err) => exit_with_error(err, 2),
+        };
 
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Mode: add-dependency");
@@ -334,11 +340,6 @@ fn run_fix_dpr(args: FixDprArgs) {
         Ok(matcher) => matcher,
         Err(err) => exit_with_error(err, 2),
     };
-    let ignore_dpr_matcher = match fs_walk::build_dpr_ignore_matcher(&args.common.ignore_dpr, &cwd)
-    {
-        Ok(matcher) => matcher,
-        Err(err) => exit_with_error(err, 2),
-    };
     let target_dpr = match resolve_dpr_file_path(&args.dpr_file, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -369,36 +370,18 @@ fn run_fix_dpr(args: FixDprArgs) {
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }
-    let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
-    if !ignore_dpr_display.is_empty() {
-        println!("Ignoring dpr (absolute): {}", ignore_dpr_display);
-    }
-
     let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
         Ok(result) => result,
         Err(err) => exit_with_error(err.to_string(), 1),
     };
-    let dpr_filter = fs_walk::filter_ignored_dpr_files(&scan.dpr_files, &ignore_dpr_matcher);
-    let mut infos = Vec::new();
-    for path in &dpr_filter.ignored_files {
-        infos.push(format!("info: ignored dpr {}", path.display()));
-    }
+    let infos = Vec::new();
     println!(
         "Found {} .pas, {} .dpr",
         scan.pas_files.len(),
         scan.dpr_files.len()
     );
 
-    if contains_path(&dpr_filter.ignored_files, &target_dpr) {
-        exit_with_error(
-            format!(
-                "DPR_FILE is ignored by --ignore-dpr: {}",
-                target_dpr.display()
-            ),
-            2,
-        );
-    }
-    if !contains_path(&dpr_filter.included_files, &target_dpr) {
+    if !contains_path(&scan.dpr_files, &target_dpr) {
         exit_with_error(
             format!(
                 "DPR_FILE not found under --search-path after ignore filters: {}",
@@ -452,7 +435,7 @@ fn run_fix_dpr(args: FixDprArgs) {
         show_warnings: args.common.show_warnings,
         pas_scanned: scan.pas_files.len(),
         dpr_summary: &dpr_summary,
-        ignored_dpr: dpr_filter.ignored_files.len(),
+        ignored_dpr: 0,
         search_roots: &search_roots,
     });
 
@@ -679,5 +662,23 @@ mod tests {
             Cli::try_parse_from(["fixdpr", "fix-dpr", "--search-path", ".", "./app1/App1.dpr"]);
 
         assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn reject_ignore_dpr_in_fix_dpr_mode() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "fix-dpr",
+            "--search-path",
+            ".",
+            "./app1/App1.dpr",
+            "--ignore-dpr",
+            "./app1/App1.dpr",
+        ]);
+
+        assert!(
+            parsed.is_err(),
+            "--ignore-dpr should not parse in fix-dpr mode"
+        );
     }
 }
