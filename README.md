@@ -44,15 +44,15 @@ fixdpr fix-dpr --search-path PATH [--search-path PATH] DPR_FILE [--delphi-path P
 Add a new dependency for all matching `.dpr` files:
 
 ```powershell
-fixdpr add-dependency --search-path .\repo .\repo\common\NewUnit.pas
+fixdpr add-dependency .\repo\common\NewUnit.pas --search-path .\repo
 ```
 
 Add dependency using Delphi fallback roots:
 
 ```powershell
 fixdpr add-dependency `
-  --search-path .\repo `
   C:\RADStudio\source\rtl\common\System.Net.HttpClient.pas `
+  --search-path .\repo `
   --delphi-path C:\RADStudio\source\rtl\common `
   --delphi-path C:\RADStudio\source\vcl
 ```
@@ -61,8 +61,8 @@ Add dependency and then run fix pass on all updated `.dpr` files:
 
 ```powershell
 fixdpr add-dependency `
-  --search-path .\repo `
   .\repo\common\NewUnit.pas `
+  --search-path .\repo `
   --fix-updated-dprs
 ```
 
@@ -70,17 +70,17 @@ Repair one `.dpr` by adding missing dependencies from search-path units:
 
 ```powershell
 fixdpr fix-dpr `
-  --search-path .\repo `
-  .\repo\app1\App1.dpr
+  .\repo\app1\App1.dpr `
+  --search-path .\repo
 ```
 
 Repair one `.dpr` while honoring ignored paths/patterns:
 
 ```powershell
 fixdpr fix-dpr `
+  .\repo\app1\App1.dpr `
   --search-path .\repo `
   --delphi-path C:\RADStudio\source\rtl\common `
-  .\repo\app1\App1.dpr `
   --ignore-path .\repo\ignored `
   --ignore-dpr ".\repo\legacy\**\*.dpr"
 ```
