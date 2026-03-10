@@ -683,6 +683,257 @@ pub fn fix_dpr_file(
     Ok(summary)
 }
 
+pub fn delete_dependency_files(
+    dpr_paths: &[PathBuf],
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
+    old_dependency_name: &str,
+) -> io::Result<DprUpdateSummary> {
+    let mut summary = DprUpdateSummary {
+        scanned: 0,
+        updated: 0,
+        updated_paths: Vec::new(),
+        warnings: Vec::new(),
+        failures: 0,
+    };
+
+    for path in dpr_paths {
+        summary.scanned += 1;
+        let bytes = match fs::read(path) {
+            Ok(data) => data,
+            Err(err) => {
+                summary.warnings.push(format!(
+                    "warning: failed to read dpr {}: {err}",
+                    path.display()
+                ));
+                summary.failures += 1;
+                continue;
+            }
+        };
+        let Some(list) = parse_dpr_uses(path, &bytes, &mut summary.warnings) else {
+            continue;
+        };
+
+        let removal_set = match collect_cascading_delete_names(
+            path,
+            &list,
+            project_cache,
+            delphi_cache,
+            old_dependency_name,
+            &mut summary.warnings,
+        )? {
+            Some(set) => set,
+            None => continue,
+        };
+
+        if !can_delete_entries(path, &list, &removal_set, &mut summary.warnings) {
+            continue;
+        }
+
+        let updated = match delete_uses_entries(path, &bytes, &list, &removal_set) {
+            Ok(value) => value,
+            Err(err) => {
+                summary.warnings.push(format!(
+                    "warning: failed to update dpr {}: {err}",
+                    path.display()
+                ));
+                summary.failures += 1;
+                continue;
+            }
+        };
+        if updated {
+            summary.updated += 1;
+            summary.updated_paths.push(path.clone());
+        }
+    }
+
+    Ok(summary)
+}
+
+fn can_delete_entries(
+    dpr_path: &Path,
+    list: &UsesList,
+    removal_set: &HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    for entry in &list.entries {
+        let key = entry.name.to_ascii_lowercase();
+        if !removal_set.contains(&key) {
+            continue;
+        }
+        if !entry.from_include {
+            continue;
+        }
+        warnings.push(format!(
+            "warning: cannot remove unit {} from {} because it originates from include fragment",
+            entry.name,
+            dpr_path.display()
+        ));
+        return false;
+    }
+    true
+}
+
+fn delete_uses_entries(
+    dpr_path: &Path,
+    bytes: &[u8],
+    list: &UsesList,
+    removal_set: &HashSet<String>,
+) -> io::Result<bool> {
+    let mut kept = Vec::new();
+    for entry in &list.entries {
+        let key = entry.name.to_ascii_lowercase();
+        if removal_set.contains(&key) {
+            continue;
+        }
+        if entry.from_include {
+            return Ok(false);
+        }
+        kept.push(entry);
+    }
+
+    if kept.is_empty() {
+        return Ok(false);
+    }
+
+    let list_start = list
+        .entries
+        .first()
+        .map(|entry| entry.start)
+        .unwrap_or(list.semicolon);
+    let new_body = render_uses_entries(list, &kept);
+
+    let mut output = Vec::with_capacity(bytes.len() + new_body.len());
+    output.extend_from_slice(&bytes[..list_start]);
+    output.extend_from_slice(new_body.as_bytes());
+    output.extend_from_slice(&bytes[list.semicolon..]);
+    write_atomic(dpr_path, &output)?;
+    Ok(true)
+}
+
+fn render_uses_entries(list: &UsesList, entries: &[&UsesEntry]) -> String {
+    if list.multiline {
+        let mut output = String::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            if idx > 0 {
+                output.push(',');
+                output.push('\n');
+                output.push_str(&list.indent);
+            }
+            output.push_str(&entry.name);
+            if let Some(in_path) = entry.in_path.as_ref() {
+                output.push_str(" in '");
+                output.push_str(in_path);
+                output.push('\'');
+            }
+        }
+        output
+    } else {
+        let mut parts = Vec::new();
+        for entry in entries {
+            if let Some(in_path) = entry.in_path.as_ref() {
+                parts.push(format!("{} in '{}'", entry.name, in_path));
+            } else {
+                parts.push(entry.name.clone());
+            }
+        }
+        parts.join(", ")
+    }
+}
+
+fn collect_cascading_delete_names(
+    dpr_path: &Path,
+    list: &UsesList,
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
+    old_dependency_name: &str,
+    warnings: &mut Vec<String>,
+) -> io::Result<Option<HashSet<String>>> {
+    let root_key = old_dependency_name.to_ascii_lowercase();
+    let mut present = HashSet::new();
+    for entry in &list.entries {
+        present.insert(entry.name.to_ascii_lowercase());
+    }
+    if !present.contains(&root_key) {
+        return Ok(None);
+    }
+
+    let project_map = build_project_map(dpr_path, list, project_cache, delphi_cache, warnings);
+    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut incoming: HashMap<String, usize> = HashMap::new();
+    for key in &present {
+        incoming.insert(key.clone(), 0);
+    }
+
+    for key in &present {
+        let Some(unit_path) = project_map.get(key) else {
+            continue;
+        };
+        let uses = match load_unit_uses_readonly(project_cache, delphi_cache, unit_path, warnings)?
+        {
+            Some(value) => value,
+            None => continue,
+        };
+        for dep_name in uses {
+            let dep_key = dep_name.to_ascii_lowercase();
+            if !present.contains(&dep_key) {
+                continue;
+            }
+            let inserted = edges
+                .entry(key.clone())
+                .or_default()
+                .insert(dep_key.clone());
+            if inserted {
+                *incoming.entry(dep_key).or_default() += 1;
+            }
+        }
+    }
+
+    let mut removed = HashSet::new();
+    let mut queue = VecDeque::new();
+    removed.insert(root_key.clone());
+    queue.push_back(root_key);
+
+    while let Some(current) = queue.pop_front() {
+        let Some(children) = edges.get(&current) else {
+            continue;
+        };
+        for child in children {
+            if removed.contains(child) {
+                continue;
+            }
+            if let Some(count) = incoming.get_mut(child) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    removed.insert(child.clone());
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    Ok(Some(removed))
+}
+
+fn load_unit_uses_readonly(
+    project_cache: &UnitCache,
+    delphi_cache: Option<&UnitCache>,
+    unit_path: &Path,
+    warnings: &mut Vec<String>,
+) -> io::Result<Option<Vec<String>>> {
+    let canonical = unit_cache::canonicalize_if_exists(unit_path);
+    if let Some(info) = project_cache.by_path.get(&canonical) {
+        return Ok(Some(info.uses.clone()));
+    }
+    if let Some(delphi_cache) = delphi_cache {
+        if let Some(info) = delphi_cache.by_path.get(&canonical) {
+            return Ok(Some(info.uses.clone()));
+        }
+    }
+
+    Ok(unit_cache::load_unit_file(&canonical, warnings)?.map(|info| info.uses))
+}
+
 fn collect_fix_root_paths(
     dpr_path: &Path,
     list: &UsesList,
@@ -2360,6 +2611,104 @@ begin end.
         );
         assert!(updated.contains("MidUnit in 'MidUnit.pas',"), "{updated}");
         assert!(updated.contains("BaseUnit in 'BaseUnit.pas';"), "{updated}");
+    }
+
+    #[test]
+    fn delete_dependency_files_removes_root_and_orphaned_dependencies() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let unit_a = root.join("UnitA.pas");
+        let old_unit = root.join("OldUnit.pas");
+        let leaf_only = root.join("LeafOnly.pas");
+        let shared_dep = root.join("SharedDep.pas");
+        let keep_unit = root.join("KeepUnit.pas");
+
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  UnitA in 'UnitA.pas',\n  OldUnit in 'OldUnit.pas',\n  LeafOnly in 'LeafOnly.pas',\n  SharedDep in 'SharedDep.pas',\n  KeepUnit in 'KeepUnit.pas';\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &unit_a,
+            "unit UnitA;\ninterface\nuses KeepUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &old_unit,
+            "unit OldUnit;\ninterface\nuses LeafOnly, SharedDep;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &keep_unit,
+            "unit KeepUnit;\ninterface\nuses SharedDep;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &leaf_only,
+            "unit LeafOnly;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &shared_dep,
+            "unit SharedDep;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let cache = unit_cache::build_unit_cache(
+            &[
+                unit_a.clone(),
+                old_unit.clone(),
+                leaf_only.clone(),
+                shared_dep.clone(),
+                keep_unit.clone(),
+            ],
+            &mut warnings,
+        )
+        .unwrap();
+
+        let result =
+            delete_dependency_files(std::slice::from_ref(&dpr_path), &cache, None, "OldUnit")
+                .unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 1, "{result:?}");
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(!updated.contains("OldUnit in 'OldUnit.pas'"), "{updated}");
+        assert!(!updated.contains("LeafOnly in 'LeafOnly.pas'"), "{updated}");
+        assert!(
+            updated.contains("SharedDep in 'SharedDep.pas'"),
+            "{updated}"
+        );
+        assert!(updated.contains("KeepUnit in 'KeepUnit.pas'"), "{updated}");
+    }
+
+    #[test]
+    fn delete_dependency_files_is_noop_when_root_not_present() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let keep_unit = root.join("KeepUnit.pas");
+
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  KeepUnit in 'KeepUnit.pas';\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &keep_unit,
+            "unit KeepUnit;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let cache =
+            unit_cache::build_unit_cache(std::slice::from_ref(&keep_unit), &mut warnings).unwrap();
+
+        let result =
+            delete_dependency_files(std::slice::from_ref(&dpr_path), &cache, None, "OldUnit")
+                .unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 0, "{result:?}");
     }
 
     fn temp_dir() -> PathBuf {

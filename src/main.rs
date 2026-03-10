@@ -31,6 +31,8 @@ enum Commands {
     AddDependency(AddDependencyArgs),
     /// Insert a specific dependency into selected .dpr files regardless of current usage
     InsertDependency(InsertDependencyArgs),
+    /// Remove a specific dependency from selected .dpr files and cascade orphan cleanup
+    DeleteDependency(DeleteDependencyArgs),
     /// Fix a single .dpr file by adding missing dependencies in its uses chain
     FixDpr(FixDprArgs),
 }
@@ -90,6 +92,30 @@ struct InsertDependencyArgs {
     /// Disable adding transitive dependencies introduced by NEW_DEPENDENCY
     #[arg(long)]
     disable_introduced_dependencies: bool,
+}
+
+#[derive(Args, Debug)]
+struct DeleteDependencyArgs {
+    #[command(flatten)]
+    common: SharedArgs,
+
+    #[command(flatten)]
+    dpr_filter: AddDependencyDprFilterArgs,
+
+    #[command(flatten)]
+    targets: InsertDependencyTargetArgs,
+
+    /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    delphi_path: Vec<String>,
+
+    /// Optional Delphi version to resolve from registry and use as fallback source root (repeatable)
+    #[arg(long, value_name = "VERSION", action = clap::ArgAction::Append)]
+    delphi_version: Vec<String>,
+
+    /// Path to a .pas file (absolute or relative to the current directory)
+    #[arg(value_name = "OLD_DEPENDENCY")]
+    old_dependency: String,
 }
 
 #[derive(Args, Debug)]
@@ -158,6 +184,7 @@ fn main() {
     match cli.command {
         Commands::AddDependency(args) => run_add_dependency(args),
         Commands::InsertDependency(args) => run_insert_dependency(args),
+        Commands::DeleteDependency(args) => run_delete_dependency(args),
         Commands::FixDpr(args) => run_fix_dpr(args),
     }
 }
@@ -690,6 +717,191 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
     }
 }
 
+fn run_delete_dependency(args: DeleteDependencyArgs) {
+    let cwd = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => exit_with_error(format!("failed to read current directory: {err}"), 2),
+    };
+    let cwd = fs_walk::canonicalize_root(&cwd);
+
+    let search_roots = match fs_walk::resolve_search_roots(&args.common.search_path, &cwd) {
+        Ok(roots) => roots,
+        Err(err) => exit_with_error(err, 2),
+    };
+    let target_paths =
+        match fs_walk::resolve_optional_roots(&args.targets.target_path, &cwd, "--target-path") {
+            Ok(paths) => paths,
+            Err(err) => exit_with_error(err, 2),
+        };
+    if let Err(err) = ensure_paths_under_search_roots(&target_paths, &search_roots, "--target-path")
+    {
+        exit_with_error(err, 2);
+    }
+
+    let target_dprs = match resolve_target_dpr_paths(&args.targets.target_dpr, &cwd) {
+        Ok(paths) => paths,
+        Err(err) => exit_with_error(err, 2),
+    };
+    if let Err(err) = ensure_paths_under_search_roots(&target_dprs, &search_roots, "--target-dpr") {
+        exit_with_error(err, 2);
+    }
+
+    let mut delphi_roots =
+        match fs_walk::resolve_optional_roots(&args.delphi_path, &cwd, "--delphi-path") {
+            Ok(roots) => roots,
+            Err(err) => exit_with_error(err, 2),
+        };
+    let mut delphi_roots_from_version = match delphi::resolve_source_roots(&args.delphi_version) {
+        Ok(roots) => roots,
+        Err(err) => exit_with_error(err, 2),
+    };
+    delphi_roots.append(&mut delphi_roots_from_version);
+    delphi_roots = dedupe_paths(delphi_roots);
+
+    let old_dependency_path = match resolve_new_dependency_path(&args.old_dependency, &cwd) {
+        Ok(path) => path,
+        Err(err) => exit_with_error(err, 2),
+    };
+    if let Err(err) = validate_new_dependency_path(&old_dependency_path) {
+        exit_with_error(err, 2);
+    }
+
+    let ignore_matcher = match fs_walk::build_ignore_matcher(&args.common.ignore_path, &cwd) {
+        Ok(matcher) => matcher,
+        Err(err) => exit_with_error(err, 2),
+    };
+    let ignore_dpr_matcher =
+        match fs_walk::build_dpr_ignore_matcher(&args.dpr_filter.ignore_dpr, &cwd) {
+            Ok(matcher) => matcher,
+            Err(err) => exit_with_error(err, 2),
+        };
+
+    let mut warnings = Vec::new();
+    println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
+    println!("Mode: delete-dependency");
+    println!("Scanning {} root(s):", search_roots.len());
+    for root in &search_roots {
+        println!("  {}", root.display());
+    }
+    if !delphi_roots.is_empty() {
+        println!("Delphi fallback roots ({}):", delphi_roots.len());
+        for root in &delphi_roots {
+            println!("  {}", root.display());
+        }
+    }
+    let delphi_version_display = format_values(&args.delphi_version);
+    if !delphi_version_display.is_empty() {
+        println!("Delphi version lookup: {}", delphi_version_display);
+    }
+    let ignore_display = format_values(&args.common.ignore_path);
+    if !ignore_display.is_empty() {
+        println!("Ignoring: {}", ignore_display);
+    }
+    let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
+    if !ignore_dpr_display.is_empty() {
+        println!("Ignoring dpr (absolute): {}", ignore_dpr_display);
+    }
+
+    let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
+        Ok(result) => result,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    let (target_dpr_files, ignored_target_dprs) = match select_target_dpr_files(
+        &scan.dpr_files,
+        &target_paths,
+        &target_dprs,
+        &ignore_dpr_matcher,
+    ) {
+        Ok(value) => value,
+        Err(err) => exit_with_error(err, 2),
+    };
+    let mut infos = Vec::new();
+    for path in &ignored_target_dprs {
+        infos.push(format!("info: ignored dpr {}", path.display()));
+    }
+
+    println!(
+        "Found {} .pas, {} .dpr",
+        scan.pas_files.len(),
+        scan.dpr_files.len()
+    );
+    println!("Updating selected .dpr files... {}", target_dpr_files.len());
+    println!("Building unit cache...");
+    let unit_cache = match unit_cache::build_unit_cache(&scan.pas_files, &mut warnings) {
+        Ok(result) => result,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    println!("Unit cache ready ({} units)", scan.pas_files.len());
+
+    let delphi_unit_cache = if delphi_roots.is_empty() {
+        None
+    } else {
+        println!("Scanning Delphi fallback roots...");
+        let delphi_scan =
+            match fs_walk::scan_files(&delphi_roots, &fs_walk::IgnoreMatcher::default()) {
+                Ok(result) => result,
+                Err(err) => exit_with_error(err.to_string(), 1),
+            };
+        println!("Found {} fallback .pas", delphi_scan.pas_files.len());
+        println!("Building Delphi fallback unit cache...");
+        let cache = match unit_cache::build_unit_cache(&delphi_scan.pas_files, &mut warnings) {
+            Ok(result) => result,
+            Err(err) => exit_with_error(err.to_string(), 1),
+        };
+        println!(
+            "Delphi fallback unit cache ready ({} units)",
+            cache.by_path.len()
+        );
+        Some(cache)
+    };
+
+    let old_dependency_path = unit_cache::canonicalize_if_exists(&old_dependency_path);
+    let old_unit = match unit_cache::load_unit_file(&old_dependency_path, &mut warnings) {
+        Ok(Some(unit)) => unit,
+        Ok(None) => {
+            exit_with_error(
+                format!(
+                    "unable to determine unit name from old dependency: {}",
+                    old_dependency_path.display()
+                ),
+                1,
+            );
+        }
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    println!(
+        "Old dependency: {} ({})",
+        old_unit.name,
+        old_unit.path.display()
+    );
+
+    let dpr_summary = match dpr_edit::delete_dependency_files(
+        &target_dpr_files,
+        &unit_cache,
+        delphi_unit_cache.as_ref(),
+        &old_unit.name,
+    ) {
+        Ok(summary) => summary,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    warnings.extend(dpr_summary.warnings.iter().cloned());
+
+    print_summary(SummaryOutput {
+        infos: &infos,
+        warnings: &warnings,
+        show_infos: args.common.show_infos,
+        show_warnings: args.common.show_warnings,
+        pas_scanned: scan.pas_files.len(),
+        dpr_summary: &dpr_summary,
+        ignored_dpr: ignored_target_dprs.len(),
+        search_roots: &search_roots,
+    });
+
+    if dpr_summary.failures > 0 {
+        process::exit(1);
+    }
+}
+
 struct SummaryOutput<'a> {
     infos: &'a [String],
     warnings: &'a [String],
@@ -1021,5 +1233,20 @@ mod tests {
             parsed.is_err(),
             "--ignore-dpr should not parse in fix-dpr mode"
         );
+    }
+
+    #[test]
+    fn parse_delete_dependency_with_target_path() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "delete-dependency",
+            "--search-path",
+            ".",
+            "--target-path",
+            "./apps",
+            "./common/LegacyUnit.pas",
+        ]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
     }
 }
