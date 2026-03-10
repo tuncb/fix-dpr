@@ -235,6 +235,48 @@ fn end_to_end_search_path_requires_existing_directory() {
 }
 
 #[test]
+fn end_to_end_delete_dependency_removes_orphaned_dependencies() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root.join("tests").join("fixtures").join("delete_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("delete_expected");
+    let temp_root = temp_dir("fixdpr_e2e_delete_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let old_dependency = temp_root.join("common").join("OldUnit.pas");
+    let target_dpr = temp_root.join("app").join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("delete-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--target-dpr")
+        .arg(&target_dpr)
+        .arg(&old_dependency)
+        .output()
+        .expect("run fixdpr");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app").join("App.dpr")).expect("read app actual"),
+    );
+    let expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app").join("App.dpr")).expect("read app expected"),
+    );
+    assert_eq!(
+        actual, expected,
+        "delete-dependency should remove OldUnit and LeafOnly only"
+    );
+}
+
+#[test]
 fn end_to_end_ignores_dpr_with_absolute_pattern_and_reports_info() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
