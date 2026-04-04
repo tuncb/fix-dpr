@@ -1002,6 +1002,85 @@ fn end_to_end_list_conditionals_warns_on_unsupported_directives() {
 }
 
 #[test]
+fn end_to_end_list_conditionals_supports_if_elseif_and_ifopt() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_if_");
+    create_list_conditionals_if_fixture(&root);
+
+    let target_dpr = root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&root)
+        .arg(&target_dpr)
+        .arg("--show-warnings")
+        .output()
+        .expect("run fixdpr list-conditionals with if/elseif/ifopt");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Warnings: 0"), "{stdout}");
+    assert!(
+        stdout.contains("Units only if DEBUG is defined"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  IfDebug"), "{stdout}");
+    assert!(stdout.contains("SharedAlways"), "{stdout}");
+    assert!(stdout.contains("IfTrace: TRACE AND NOT DEBUG"), "{stdout}");
+    assert!(
+        stdout.contains("IfFallback: NOT DEBUG AND NOT TRACE"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("OptOn: IFOPT(N+)"), "{stdout}");
+    assert!(stdout.contains("OptOff: NOT IFOPT(N+)"), "{stdout}");
+}
+
+#[test]
+fn end_to_end_list_conditionals_keeps_unsupported_if_branch_local() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_if_fallback_");
+    create_list_conditionals_if_fallback_fixture(&root);
+
+    let target_dpr = root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&root)
+        .arg(&target_dpr)
+        .arg("--show-warnings")
+        .output()
+        .expect("run fixdpr list-conditionals with unsupported if expression");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Warnings: 1"), "{stdout}");
+    assert!(
+        stdout.contains("unsupported IF expression RTLVersion >= 14"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("unmatched ELSE"), "{stdout}");
+    assert!(!stdout.contains("unmatched ENDIF"), "{stdout}");
+    assert!(
+        stdout.contains("Foo: UNKNOWN(IF: RTLVERSION >= 14)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Bar: NOT UNKNOWN(IF: RTLVERSION >= 14)"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn end_to_end_insert_dependency_targets_path_and_creates_uses_section() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root.join("tests").join("fixtures").join("insert_repo");
@@ -1293,6 +1372,81 @@ fn create_list_conditionals_unsupported_fixture(root: &Path) {
         root,
         "LeafUnit.pas",
         "unit LeafUnit;\ninterface\nimplementation\nend.\n",
+    );
+}
+
+fn create_list_conditionals_if_fixture(root: &Path) {
+    fs::create_dir_all(root).expect("create root");
+
+    write_file(
+        root,
+        "App.dpr",
+        "program App;\nuses\n  ConditionalRoot in 'ConditionalRoot.pas',\n  OptRoot in 'OptRoot.pas';\nbegin\nend.\n",
+    );
+    write_file(
+        root,
+        "ConditionalRoot.pas",
+        "unit ConditionalRoot;\ninterface\nuses {$IF defined(DEBUG)} IfDebug in 'IfDebug.pas', {$ELSEIF defined(TRACE)} IfTrace in 'IfTrace.pas', {$ELSE} IfFallback in 'IfFallback.pas', {$ENDIF} SharedAlways in 'SharedAlways.pas';\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "OptRoot.pas",
+        "unit OptRoot;\ninterface\nuses {$IFOPT N+} OptOn in 'OptOn.pas', {$ELSE} OptOff in 'OptOff.pas', {$ENDIF} SharedAlways in 'SharedAlways.pas';\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "IfDebug.pas",
+        "unit IfDebug;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "IfTrace.pas",
+        "unit IfTrace;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "IfFallback.pas",
+        "unit IfFallback;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "OptOn.pas",
+        "unit OptOn;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "OptOff.pas",
+        "unit OptOff;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "SharedAlways.pas",
+        "unit SharedAlways;\ninterface\nimplementation\nend.\n",
+    );
+}
+
+fn create_list_conditionals_if_fallback_fixture(root: &Path) {
+    fs::create_dir_all(root).expect("create root");
+
+    write_file(
+        root,
+        "App.dpr",
+        "program App;\nuses\n  RootUnit in 'RootUnit.pas';\nbegin\nend.\n",
+    );
+    write_file(
+        root,
+        "RootUnit.pas",
+        "unit RootUnit;\ninterface\nuses {$IF RTLVersion >= 14} Foo in 'Foo.pas', {$ELSE} Bar in 'Bar.pas' {$ENDIF};\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "Foo.pas",
+        "unit Foo;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "Bar.pas",
+        "unit Bar;\ninterface\nimplementation\nend.\n",
     );
 }
 

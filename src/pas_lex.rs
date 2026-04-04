@@ -103,6 +103,9 @@ pub enum CompilerDirective {
     Include(String),
     IfDef(String),
     IfNDef(String),
+    IfExpr(String),
+    IfOpt(String),
+    ElseIfExpr(String),
     Else,
     EndIf,
     UnsupportedAffecting(String),
@@ -159,6 +162,24 @@ fn parse_compiler_directive_inner(
             i = skip_ws(bytes, next);
             CompilerDirective::IfNDef(symbol)
         }
+        "IF" => {
+            i = skip_ws(bytes, i);
+            let (expr, next) = read_directive_payload(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::IfExpr(expr)
+        }
+        "IFOPT" => {
+            i = skip_ws(bytes, i);
+            let (expr, next) = read_directive_payload(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::IfOpt(expr)
+        }
+        "ELSEIF" => {
+            i = skip_ws(bytes, i);
+            let (expr, next) = read_directive_payload(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::ElseIfExpr(expr)
+        }
         "ELSE" => {
             i = skip_ws(bytes, i);
             CompilerDirective::Else
@@ -167,7 +188,7 @@ fn parse_compiler_directive_inner(
             i = skip_ws(bytes, i);
             CompilerDirective::EndIf
         }
-        "DEFINE" | "UNDEF" | "IF" | "IFOPT" | "ELSEIF" => {
+        "DEFINE" | "UNDEF" => {
             i = skip_to_comment_end(bytes, i, end);
             CompilerDirective::UnsupportedAffecting(upper)
         }
@@ -208,6 +229,22 @@ fn read_directive_filename(bytes: &[u8], mut i: usize, end: CommentEnd) -> Optio
         return None;
     }
     Some((value, i))
+}
+
+fn read_directive_payload(bytes: &[u8], i: usize, end: CommentEnd) -> Option<(String, usize)> {
+    let start = i;
+    let next = skip_to_comment_end(bytes, i, end);
+    if next < start {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&bytes[start..next])
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some((value, next))
+    }
 }
 
 fn find_comment_end(bytes: &[u8], mut i: usize, end: CommentEnd) -> Option<usize> {

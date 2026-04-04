@@ -12,6 +12,7 @@ pub enum CondExpr {
     True,
     False,
     Symbol(String),
+    IfOpt(String),
     Not(Box<CondExpr>),
     And(Vec<CondExpr>),
     Or(Vec<CondExpr>),
@@ -67,9 +68,9 @@ enum Section {
 
 #[derive(Clone, Debug)]
 struct CondFrame {
-    then_branch: CondExpr,
-    else_branch: CondExpr,
-    in_else: bool,
+    active_branch: CondExpr,
+    remaining_branch: CondExpr,
+    seen_else: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -108,6 +109,7 @@ pub fn normalize_condition(expr: CondExpr) -> CondExpr {
         CondExpr::True => CondExpr::True,
         CondExpr::False => CondExpr::False,
         CondExpr::Symbol(symbol) => CondExpr::Symbol(symbol.trim().to_ascii_uppercase()),
+        CondExpr::IfOpt(symbol) => CondExpr::IfOpt(symbol.trim().to_ascii_uppercase()),
         CondExpr::Unknown(label) => CondExpr::Unknown(label.trim().to_ascii_uppercase()),
         CondExpr::Not(inner) => match normalize_condition(*inner) {
             CondExpr::True => CondExpr::False,
@@ -124,6 +126,7 @@ pub fn evaluate_condition(expr: &CondExpr, assumptions: &Assumptions) -> EvalRes
     match expr {
         CondExpr::True => EvalResult::Always,
         CondExpr::False => EvalResult::Never,
+        CondExpr::IfOpt(_) => EvalResult::Maybe,
         CondExpr::Unknown(_) => EvalResult::Maybe,
         CondExpr::Symbol(symbol) => match assumptions.get(symbol) {
             Some(AssumedValue::On) => EvalResult::Always,
@@ -268,38 +271,40 @@ impl ConditionState {
         }
     }
 
-    fn apply_supported_directive(
+    fn apply_directive(
         &mut self,
         directive: CompilerDirective,
         source_path: &Path,
         warnings: &mut Vec<String>,
     ) {
         match directive {
-            CompilerDirective::IfDef(symbol) => self.push_symbol(symbol, false),
-            CompilerDirective::IfNDef(symbol) => self.push_symbol(symbol, true),
-            CompilerDirective::Else => {
-                if let Some(frame) = self.frames.last_mut() {
-                    frame.in_else = !frame.in_else;
-                } else {
-                    warnings.push(format!(
-                        "warning: unmatched ELSE in {}",
-                        source_path.display()
-                    ));
-                }
+            CompilerDirective::IfDef(symbol) => self.push_branch(CondExpr::Symbol(symbol)),
+            CompilerDirective::IfNDef(symbol) => self.push_branch(normalize_condition(
+                CondExpr::Not(Box::new(CondExpr::Symbol(symbol))),
+            )),
+            CompilerDirective::IfExpr(expr) => {
+                let parsed = self.parse_if_expr("IF", &expr, source_path, warnings);
+                self.push_branch(parsed);
             }
-            CompilerDirective::EndIf => {
-                if self.frames.pop().is_none() {
-                    warnings.push(format!(
-                        "warning: unmatched ENDIF in {}",
-                        source_path.display()
-                    ));
-                }
+            CompilerDirective::IfOpt(option) => {
+                self.push_branch(CondExpr::IfOpt(option));
             }
+            CompilerDirective::ElseIfExpr(expr) => {
+                let parsed = self.parse_if_expr("ELSEIF", &expr, source_path, warnings);
+                self.enter_elseif(parsed, source_path, warnings);
+            }
+            CompilerDirective::Else => self.enter_else(source_path, warnings),
+            CompilerDirective::EndIf => self.end_if(source_path, warnings),
             _ => {}
         }
     }
 
-    fn note_unsupported(&mut self, name: &str, source_path: &Path, warnings: &mut Vec<String>) {
+    fn note_unsupported_directive(
+        &mut self,
+        name: &str,
+        source_path: &Path,
+        warnings: &mut Vec<String>,
+    ) {
         let upper = name.trim().to_ascii_uppercase();
         let warning_key = format!("{}|{}", source_path.display(), upper);
         if self.warned_unsupported.insert(warning_key) {
@@ -315,33 +320,121 @@ impl ConditionState {
         }
     }
 
-    fn push_symbol(&mut self, symbol: String, negated: bool) {
-        let symbol = normalize_condition(CondExpr::Symbol(symbol));
-        let then_branch = if negated {
-            normalize_condition(CondExpr::Not(Box::new(symbol.clone())))
+    fn note_unsupported_expression(
+        &mut self,
+        kind: &str,
+        expr: &str,
+        source_path: &Path,
+        warnings: &mut Vec<String>,
+    ) {
+        let rendered = expr.trim();
+        let warning_key = format!(
+            "{}|{}|{}",
+            source_path.display(),
+            kind.trim().to_ascii_uppercase(),
+            rendered.to_ascii_uppercase()
+        );
+        if self.warned_unsupported.insert(warning_key) {
+            warnings.push(format!(
+                "warning: unsupported {} expression {} in conditional uses context for {}",
+                kind.trim().to_ascii_uppercase(),
+                rendered,
+                source_path.display()
+            ));
+        }
+    }
+
+    fn parse_if_expr(
+        &mut self,
+        kind: &str,
+        expr: &str,
+        source_path: &Path,
+        warnings: &mut Vec<String>,
+    ) -> CondExpr {
+        if let Some(parsed) = parse_if_expression(expr) {
+            parsed
         } else {
-            symbol.clone()
-        };
-        let else_branch = if negated {
-            symbol
-        } else {
-            normalize_condition(CondExpr::Not(Box::new(symbol)))
-        };
+            self.note_unsupported_expression(kind, expr, source_path, warnings);
+            CondExpr::Unknown(format!(
+                "{}: {}",
+                kind.trim().to_ascii_uppercase(),
+                expr.trim()
+            ))
+        }
+    }
+
+    fn push_branch(&mut self, condition: CondExpr) {
+        let condition = normalize_condition(condition);
         self.frames.push(CondFrame {
-            then_branch,
-            else_branch,
-            in_else: false,
+            active_branch: condition.clone(),
+            remaining_branch: other_not(condition),
+            seen_else: false,
         });
+    }
+
+    fn enter_elseif(
+        &mut self,
+        condition: CondExpr,
+        source_path: &Path,
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(frame) = self.frames.last_mut() else {
+            warnings.push(format!(
+                "warning: unmatched ELSEIF in {}",
+                source_path.display()
+            ));
+            return;
+        };
+        if frame.seen_else {
+            warnings.push(format!(
+                "warning: ELSEIF after ELSE in {}",
+                source_path.display()
+            ));
+            return;
+        }
+
+        let condition = normalize_condition(condition);
+        let remaining = frame.remaining_branch.clone();
+        frame.active_branch =
+            normalize_condition(CondExpr::And(vec![remaining.clone(), condition.clone()]));
+        frame.remaining_branch =
+            normalize_condition(CondExpr::And(vec![remaining, other_not(condition)]));
+    }
+
+    fn enter_else(&mut self, source_path: &Path, warnings: &mut Vec<String>) {
+        let Some(frame) = self.frames.last_mut() else {
+            warnings.push(format!(
+                "warning: unmatched ELSE in {}",
+                source_path.display()
+            ));
+            return;
+        };
+        if frame.seen_else {
+            warnings.push(format!(
+                "warning: duplicate ELSE in {}",
+                source_path.display()
+            ));
+            return;
+        }
+
+        frame.active_branch = frame.remaining_branch.clone();
+        frame.remaining_branch = CondExpr::False;
+        frame.seen_else = true;
+    }
+
+    fn end_if(&mut self, source_path: &Path, warnings: &mut Vec<String>) {
+        if self.frames.pop().is_none() {
+            warnings.push(format!(
+                "warning: unmatched ENDIF in {}",
+                source_path.display()
+            ));
+        }
     }
 }
 
 impl CondFrame {
     fn current_branch(&self) -> CondExpr {
-        if self.in_else {
-            self.else_branch.clone()
-        } else {
-            self.then_branch.clone()
-        }
+        self.active_branch.clone()
     }
 }
 
@@ -396,6 +489,7 @@ fn render_condition_with_precedence(expr: &CondExpr, parent_precedence: u8) -> S
         CondExpr::True => (3, "TRUE".to_string()),
         CondExpr::False => (3, "FALSE".to_string()),
         CondExpr::Symbol(symbol) => (3, symbol.to_ascii_uppercase()),
+        CondExpr::IfOpt(option) => (3, format!("IFOPT({})", option.to_ascii_uppercase())),
         CondExpr::Unknown(label) => (3, format!("UNKNOWN({})", label.to_ascii_uppercase())),
         CondExpr::Not(inner) => (
             2,
@@ -428,6 +522,182 @@ fn render_condition_with_precedence(expr: &CondExpr, parent_precedence: u8) -> S
 
 fn other_not(expr: CondExpr) -> CondExpr {
     normalize_condition(CondExpr::Not(Box::new(expr)))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum IfExprToken {
+    Ident(String),
+    Number(String),
+    LParen,
+    RParen,
+}
+
+struct IfExprParser {
+    tokens: Vec<IfExprToken>,
+    pos: usize,
+}
+
+fn parse_if_expression(expr: &str) -> Option<CondExpr> {
+    let tokens = tokenize_if_expression(expr)?;
+    let mut parser = IfExprParser { tokens, pos: 0 };
+    let parsed = parser.parse_or_expr()?;
+    if parser.pos != parser.tokens.len() {
+        return None;
+    }
+    Some(normalize_condition(parsed))
+}
+
+fn tokenize_if_expression(expr: &str) -> Option<Vec<IfExprToken>> {
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'(' => {
+                tokens.push(IfExprToken::LParen);
+                i += 1;
+            }
+            b')' => {
+                tokens.push(IfExprToken::RParen);
+                i += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.')
+                {
+                    i += 1;
+                }
+                tokens.push(IfExprToken::Ident(
+                    String::from_utf8_lossy(&bytes[start..i]).to_string(),
+                ));
+            }
+            byte if byte.is_ascii_digit() => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
+                tokens.push(IfExprToken::Number(
+                    String::from_utf8_lossy(&bytes[start..i]).to_string(),
+                ));
+            }
+            _ => return None,
+        }
+    }
+
+    Some(tokens)
+}
+
+impl IfExprParser {
+    fn parse_or_expr(&mut self) -> Option<CondExpr> {
+        let mut parts = vec![self.parse_and_expr()?];
+        while self.consume_keyword("or") {
+            parts.push(self.parse_and_expr()?);
+        }
+        Some(match parts.len() {
+            1 => parts.pop().unwrap_or(CondExpr::False),
+            _ => CondExpr::Or(parts),
+        })
+    }
+
+    fn parse_and_expr(&mut self) -> Option<CondExpr> {
+        let mut parts = vec![self.parse_not_expr()?];
+        while self.consume_keyword("and") {
+            parts.push(self.parse_not_expr()?);
+        }
+        Some(match parts.len() {
+            1 => parts.pop().unwrap_or(CondExpr::False),
+            _ => CondExpr::And(parts),
+        })
+    }
+
+    fn parse_not_expr(&mut self) -> Option<CondExpr> {
+        if self.consume_keyword("not") {
+            return Some(CondExpr::Not(Box::new(self.parse_not_expr()?)));
+        }
+        self.parse_primary_expr()
+    }
+
+    fn parse_primary_expr(&mut self) -> Option<CondExpr> {
+        match self.peek()?.clone() {
+            IfExprToken::LParen => {
+                self.pos += 1;
+                let expr = self.parse_or_expr()?;
+                if !matches!(self.peek(), Some(IfExprToken::RParen)) {
+                    return None;
+                }
+                self.pos += 1;
+                Some(expr)
+            }
+            IfExprToken::Ident(ident) if ident.eq_ignore_ascii_case("defined") => {
+                self.pos += 1;
+                self.parse_defined_expr()
+            }
+            IfExprToken::Ident(ident) if ident.eq_ignore_ascii_case("true") => {
+                self.pos += 1;
+                Some(CondExpr::True)
+            }
+            IfExprToken::Ident(ident) if ident.eq_ignore_ascii_case("false") => {
+                self.pos += 1;
+                Some(CondExpr::False)
+            }
+            IfExprToken::Ident(ident) => {
+                self.pos += 1;
+                Some(CondExpr::Symbol(ident))
+            }
+            IfExprToken::Number(number) => {
+                self.pos += 1;
+                match number.as_str() {
+                    "1" => Some(CondExpr::True),
+                    "0" => Some(CondExpr::False),
+                    _ => None,
+                }
+            }
+            IfExprToken::RParen => None,
+        }
+    }
+
+    fn parse_defined_expr(&mut self) -> Option<CondExpr> {
+        if matches!(self.peek(), Some(IfExprToken::LParen)) {
+            self.pos += 1;
+            let symbol = self.consume_ident()?;
+            if !matches!(self.peek(), Some(IfExprToken::RParen)) {
+                return None;
+            }
+            self.pos += 1;
+            return Some(CondExpr::Symbol(symbol));
+        }
+
+        Some(CondExpr::Symbol(self.consume_ident()?))
+    }
+
+    fn consume_ident(&mut self) -> Option<String> {
+        match self.peek()?.clone() {
+            IfExprToken::Ident(ident) => {
+                self.pos += 1;
+                Some(ident)
+            }
+            _ => None,
+        }
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        match self.peek() {
+            Some(IfExprToken::Ident(ident)) if ident.eq_ignore_ascii_case(keyword) => {
+                self.pos += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn peek(&self) -> Option<&IfExprToken> {
+        self.tokens.get(self.pos)
+    }
 }
 
 pub fn parse_unit_conditional_uses(
@@ -753,24 +1023,21 @@ fn skip_noise_and_includes(
                             }
                             continue;
                         }
-                        CompilerDirective::IfDef(_)
-                        | CompilerDirective::IfNDef(_)
-                        | CompilerDirective::Else
-                        | CompilerDirective::EndIf => {
-                            condition_state.apply_supported_directive(
-                                directive,
+                        CompilerDirective::UnsupportedAffecting(name) => {
+                            condition_state.note_unsupported_directive(
+                                name.as_str(),
                                 source_path,
                                 warnings,
                             );
                             i = end;
                             continue;
                         }
-                        CompilerDirective::UnsupportedAffecting(name) => {
-                            condition_state.note_unsupported(name.as_str(), source_path, warnings);
+                        CompilerDirective::Other(_) => {
                             i = end;
                             continue;
                         }
-                        CompilerDirective::Other(_) => {
+                        _ => {
+                            condition_state.apply_directive(directive, source_path, warnings);
                             i = end;
                             continue;
                         }
@@ -799,24 +1066,21 @@ fn skip_noise_no_include(
             b'{' | b'(' => {
                 if let Some((directive, end)) = pas_lex::parse_compiler_directive(bytes, i) {
                     match directive {
-                        CompilerDirective::IfDef(_)
-                        | CompilerDirective::IfNDef(_)
-                        | CompilerDirective::Else
-                        | CompilerDirective::EndIf => {
-                            condition_state.apply_supported_directive(
-                                directive,
+                        CompilerDirective::UnsupportedAffecting(name) => {
+                            condition_state.note_unsupported_directive(
+                                name.as_str(),
                                 source_path,
                                 warnings,
                             );
                             i = end;
                             continue;
                         }
-                        CompilerDirective::UnsupportedAffecting(name) => {
-                            condition_state.note_unsupported(name.as_str(), source_path, warnings);
+                        CompilerDirective::Include(_) | CompilerDirective::Other(_) => {
                             i = end;
                             continue;
                         }
-                        CompilerDirective::Include(_) | CompilerDirective::Other(_) => {
+                        _ => {
+                            condition_state.apply_directive(directive, source_path, warnings);
                             i = end;
                             continue;
                         }
@@ -863,24 +1127,21 @@ fn scan_to_delimiter(
                             }
                             continue;
                         }
-                        CompilerDirective::IfDef(_)
-                        | CompilerDirective::IfNDef(_)
-                        | CompilerDirective::Else
-                        | CompilerDirective::EndIf => {
-                            condition_state.apply_supported_directive(
-                                directive,
+                        CompilerDirective::UnsupportedAffecting(name) => {
+                            condition_state.note_unsupported_directive(
+                                name.as_str(),
                                 source_path,
                                 warnings,
                             );
                             i = end;
                             continue;
                         }
-                        CompilerDirective::UnsupportedAffecting(name) => {
-                            condition_state.note_unsupported(name.as_str(), source_path, warnings);
+                        CompilerDirective::Other(_) => {
                             i = end;
                             continue;
                         }
-                        CompilerDirective::Other(_) => {
+                        _ => {
+                            condition_state.apply_directive(directive, source_path, warnings);
                             i = end;
                             continue;
                         }
@@ -935,12 +1196,15 @@ fn handle_scan_directive(
     match directive {
         CompilerDirective::IfDef(_)
         | CompilerDirective::IfNDef(_)
+        | CompilerDirective::IfExpr(_)
+        | CompilerDirective::IfOpt(_)
+        | CompilerDirective::ElseIfExpr(_)
         | CompilerDirective::Else
         | CompilerDirective::EndIf => {
-            condition_state.apply_supported_directive(directive, source_path, warnings);
+            condition_state.apply_directive(directive, source_path, warnings)
         }
         CompilerDirective::UnsupportedAffecting(name) => {
-            condition_state.note_unsupported(name.as_str(), source_path, warnings);
+            condition_state.note_unsupported_directive(name.as_str(), source_path, warnings);
         }
         CompilerDirective::Include(_) | CompilerDirective::Other(_) => {}
     }
@@ -1234,6 +1498,112 @@ end.
         assert_eq!(entries.len(), 2);
         assert_eq!(render_condition(&entries[0].condition), "DEBUG");
         assert_eq!(render_condition(&entries[1].condition), "NOT DEBUG");
+    }
+
+    #[test]
+    fn parse_unit_conditional_uses_supports_if_boolean_expressions() {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let src = br#"
+unit Demo;
+interface
+{$IF defined(DEBUG) and not defined(TRACE)}
+uses Foo;
+{$ENDIF}
+implementation
+end.
+"#;
+
+        let mut warnings = Vec::new();
+        let entries = parse_unit_conditional_uses(&unit_path, src, &mut warnings);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            render_condition(&entries[0].condition),
+            "DEBUG AND NOT TRACE"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn parse_unit_conditional_uses_supports_elseif_chains() {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let src = br#"
+unit Demo;
+interface
+{$IF defined(A)}
+uses Foo,
+{$ELSEIF defined(B)}
+  Bar,
+{$ELSE}
+  Baz;
+{$ENDIF}
+implementation
+end.
+"#;
+
+        let mut warnings = Vec::new();
+        let entries = parse_unit_conditional_uses(&unit_path, src, &mut warnings);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(render_condition(&entries[0].condition), "A");
+        assert_eq!(render_condition(&entries[1].condition), "B AND NOT A");
+        assert_eq!(render_condition(&entries[2].condition), "NOT A AND NOT B");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn parse_unit_conditional_uses_supports_ifopt_directives() {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let src = br#"
+unit Demo;
+interface
+{$IFOPT N+}
+uses Foo,
+{$ELSE}
+  Bar;
+{$ENDIF}
+implementation
+end.
+"#;
+
+        let mut warnings = Vec::new();
+        let entries = parse_unit_conditional_uses(&unit_path, src, &mut warnings);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(render_condition(&entries[0].condition), "IFOPT(N+)");
+        assert_eq!(render_condition(&entries[1].condition), "NOT IFOPT(N+)");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn parse_unit_conditional_uses_keeps_unsupported_if_expressions_branch_local() {
+        let root = temp_dir();
+        let unit_path = root.join("Demo.pas");
+        let src = br#"
+unit Demo;
+interface
+{$IF RTLVersion >= 14}
+uses Foo,
+{$ELSE}
+  Bar;
+{$ENDIF}
+implementation
+end.
+"#;
+
+        let mut warnings = Vec::new();
+        let entries = parse_unit_conditional_uses(&unit_path, src, &mut warnings);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            render_condition(&entries[0].condition),
+            "UNKNOWN(IF: RTLVERSION >= 14)"
+        );
+        assert_eq!(
+            render_condition(&entries[1].condition),
+            "NOT UNKNOWN(IF: RTLVERSION >= 14)"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unsupported IF expression RTLVersion >= 14"));
     }
 
     #[test]
