@@ -86,14 +86,8 @@ pub fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
 }
 
 pub fn parse_include_directive(bytes: &[u8], start: usize) -> Option<(String, usize)> {
-    if start >= bytes.len() {
-        return None;
-    }
-    match bytes[start] {
-        b'{' => parse_include_directive_inner(bytes, start + 1, CommentEnd::Brace),
-        b'(' if bytes.get(start + 1) == Some(&b'*') => {
-            parse_include_directive_inner(bytes, start + 2, CommentEnd::Paren)
-        }
+    match parse_compiler_directive(bytes, start) {
+        Some((CompilerDirective::Include(filename), end)) => Some((filename, end)),
         _ => None,
     }
 }
@@ -104,11 +98,35 @@ enum CommentEnd {
     Paren,
 }
 
-fn parse_include_directive_inner(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompilerDirective {
+    Include(String),
+    IfDef(String),
+    IfNDef(String),
+    Else,
+    EndIf,
+    UnsupportedAffecting(String),
+    Other(String),
+}
+
+pub fn parse_compiler_directive(bytes: &[u8], start: usize) -> Option<(CompilerDirective, usize)> {
+    if start >= bytes.len() {
+        return None;
+    }
+    match bytes[start] {
+        b'{' => parse_compiler_directive_inner(bytes, start + 1, CommentEnd::Brace),
+        b'(' if bytes.get(start + 1) == Some(&b'*') => {
+            parse_compiler_directive_inner(bytes, start + 2, CommentEnd::Paren)
+        }
+        _ => None,
+    }
+}
+
+fn parse_compiler_directive_inner(
     bytes: &[u8],
     mut i: usize,
     end: CommentEnd,
-) -> Option<(String, usize)> {
+) -> Option<(CompilerDirective, usize)> {
     i = skip_ws(bytes, i);
     if bytes.get(i) != Some(&b'$') {
         return None;
@@ -119,15 +137,48 @@ fn parse_include_directive_inner(
         return None;
     }
     let (token, next) = read_ident(bytes, i);
-    if !token.eq_ignore_ascii_case("i") && !token.eq_ignore_ascii_case("include") {
-        return None;
-    }
     i = next;
-    i = skip_ws(bytes, i);
-    let (filename, next) = read_directive_filename(bytes, i, end)?;
-    i = skip_ws(bytes, next);
+    let upper = token.to_ascii_uppercase();
+
+    let directive = match upper.as_str() {
+        "I" | "INCLUDE" => {
+            i = skip_ws(bytes, i);
+            let (filename, next) = read_directive_filename(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::Include(filename)
+        }
+        "IFDEF" => {
+            i = skip_ws(bytes, i);
+            let (symbol, next) = read_directive_symbol(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::IfDef(symbol)
+        }
+        "IFNDEF" => {
+            i = skip_ws(bytes, i);
+            let (symbol, next) = read_directive_symbol(bytes, i, end)?;
+            i = skip_ws(bytes, next);
+            CompilerDirective::IfNDef(symbol)
+        }
+        "ELSE" => {
+            i = skip_ws(bytes, i);
+            CompilerDirective::Else
+        }
+        "ENDIF" | "IFEND" => {
+            i = skip_ws(bytes, i);
+            CompilerDirective::EndIf
+        }
+        "DEFINE" | "UNDEF" | "IF" | "IFOPT" | "ELSEIF" => {
+            i = skip_to_comment_end(bytes, i, end);
+            CompilerDirective::UnsupportedAffecting(upper)
+        }
+        _ => {
+            i = skip_to_comment_end(bytes, i, end);
+            CompilerDirective::Other(upper)
+        }
+    };
+
     let end_pos = find_comment_end(bytes, i, end)?;
-    Some((filename, end_pos))
+    Some((directive, end_pos))
 }
 
 fn read_directive_filename(bytes: &[u8], mut i: usize, end: CommentEnd) -> Option<(String, usize)> {
@@ -172,6 +223,13 @@ fn find_comment_end(bytes: &[u8], mut i: usize, end: CommentEnd) -> Option<usize
     None
 }
 
+fn skip_to_comment_end(bytes: &[u8], mut i: usize, end: CommentEnd) -> usize {
+    while i < bytes.len() && !is_comment_end(bytes, i, end) {
+        i += 1;
+    }
+    i
+}
+
 fn is_comment_end(bytes: &[u8], i: usize, end: CommentEnd) -> bool {
     match end {
         CommentEnd::Brace => bytes.get(i) == Some(&b'}'),
@@ -184,6 +242,25 @@ fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+fn read_directive_symbol(bytes: &[u8], i: usize, _end: CommentEnd) -> Option<(String, usize)> {
+    if i >= bytes.len() || !is_ident_start(bytes[i]) {
+        return None;
+    }
+
+    let start = i;
+    let mut next = i + 1;
+    while next < bytes.len() && is_ident_continue(bytes[next]) {
+        next += 1;
+    }
+    if next == start {
+        return None;
+    }
+    Some((
+        String::from_utf8_lossy(&bytes[start..next]).to_string(),
+        next,
+    ))
 }
 
 pub fn read_ident(bytes: &[u8], mut i: usize) -> (String, usize) {

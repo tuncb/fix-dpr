@@ -5,6 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
+mod conditionals;
 mod delphi;
 mod dpr_edit;
 mod fs_walk;
@@ -35,6 +36,8 @@ enum Commands {
     DeleteDependency(DeleteDependencyArgs),
     /// Fix a single .dpr file by adding missing dependencies in its uses chain
     FixDpr(FixDprArgs),
+    /// List conditional unit dependencies for a single .dpr file
+    ListConditionals(ListConditionalsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -137,6 +140,24 @@ struct FixDprArgs {
 }
 
 #[derive(Args, Debug)]
+struct ListConditionalsArgs {
+    #[command(flatten)]
+    common: SharedArgs,
+
+    /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    delphi_path: Vec<String>,
+
+    /// Optional Delphi version to resolve from registry and use as fallback source root (repeatable)
+    #[arg(long, value_name = "VERSION", action = clap::ArgAction::Append)]
+    delphi_version: Vec<String>,
+
+    /// Path to the target .dpr file to inspect (absolute or relative to the current directory)
+    #[arg(value_name = "DPR_FILE")]
+    dpr_file: String,
+}
+
+#[derive(Args, Debug)]
 struct SharedArgs {
     /// Root folder path to recursively scan for .dpr and .pas (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
@@ -186,6 +207,7 @@ fn main() {
         Commands::InsertDependency(args) => run_insert_dependency(args),
         Commands::DeleteDependency(args) => run_delete_dependency(args),
         Commands::FixDpr(args) => run_fix_dpr(args),
+        Commands::ListConditionals(args) => run_list_conditionals(args),
     }
 }
 
@@ -517,6 +539,136 @@ fn run_fix_dpr(args: FixDprArgs) {
     if dpr_summary.failures > 0 {
         process::exit(1);
     }
+}
+
+fn run_list_conditionals(args: ListConditionalsArgs) {
+    let cwd = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => exit_with_error(format!("failed to read current directory: {err}"), 2),
+    };
+    let cwd = fs_walk::canonicalize_root(&cwd);
+
+    let search_roots = match fs_walk::resolve_search_roots(&args.common.search_path, &cwd) {
+        Ok(roots) => roots,
+        Err(err) => exit_with_error(err, 2),
+    };
+    let mut delphi_roots =
+        match fs_walk::resolve_optional_roots(&args.delphi_path, &cwd, "--delphi-path") {
+            Ok(roots) => roots,
+            Err(err) => exit_with_error(err, 2),
+        };
+    let mut delphi_roots_from_version = match delphi::resolve_source_roots(&args.delphi_version) {
+        Ok(roots) => roots,
+        Err(err) => exit_with_error(err, 2),
+    };
+    delphi_roots.append(&mut delphi_roots_from_version);
+    delphi_roots = dedupe_paths(delphi_roots);
+    let ignore_matcher = match fs_walk::build_ignore_matcher(&args.common.ignore_path, &cwd) {
+        Ok(matcher) => matcher,
+        Err(err) => exit_with_error(err, 2),
+    };
+    let target_dpr = match resolve_dpr_file_path(&args.dpr_file, &cwd) {
+        Ok(path) => path,
+        Err(err) => exit_with_error(err, 2),
+    };
+    if let Err(err) = validate_dpr_file_path(&target_dpr, "DPR_FILE") {
+        exit_with_error(err, 2);
+    }
+    let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
+
+    println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
+    println!("Mode: list-conditionals");
+    println!("Target dpr: {}", target_dpr.display());
+    println!("Scanning {} root(s):", search_roots.len());
+    for root in &search_roots {
+        println!("  {}", root.display());
+    }
+    if !delphi_roots.is_empty() {
+        println!("Delphi fallback roots ({}):", delphi_roots.len());
+        for root in &delphi_roots {
+            println!("  {}", root.display());
+        }
+    }
+    let delphi_version_display = format_values(&args.delphi_version);
+    if !delphi_version_display.is_empty() {
+        println!("Delphi version lookup: {}", delphi_version_display);
+    }
+    let ignore_display = format_values(&args.common.ignore_path);
+    if !ignore_display.is_empty() {
+        println!("Ignoring: {}", ignore_display);
+    }
+
+    let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
+        Ok(result) => result,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    println!(
+        "Found {} .pas, {} .dpr",
+        scan.pas_files.len(),
+        scan.dpr_files.len()
+    );
+
+    if !contains_path(&scan.dpr_files, &target_dpr) {
+        exit_with_error(
+            format!(
+                "DPR_FILE not found under --search-path after ignore filters: {}",
+                target_dpr.display()
+            ),
+            2,
+        );
+    }
+
+    let mut warnings = Vec::new();
+    println!("Building unit cache...");
+    let unit_cache = match unit_cache::build_unit_cache(&scan.pas_files, &mut warnings) {
+        Ok(result) => result,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    println!("Unit cache ready ({} units)", scan.pas_files.len());
+    let delphi_unit_cache = if delphi_roots.is_empty() {
+        None
+    } else {
+        println!("Scanning Delphi fallback roots...");
+        let delphi_scan =
+            match fs_walk::scan_files(&delphi_roots, &fs_walk::IgnoreMatcher::default()) {
+                Ok(result) => result,
+                Err(err) => exit_with_error(err.to_string(), 1),
+            };
+        println!("Found {} fallback .pas", delphi_scan.pas_files.len());
+        println!("Building Delphi fallback unit cache...");
+        let cache = match unit_cache::build_unit_cache(&delphi_scan.pas_files, &mut warnings) {
+            Ok(result) => result,
+            Err(err) => exit_with_error(err.to_string(), 1),
+        };
+        println!(
+            "Delphi fallback unit cache ready ({} units)",
+            cache.by_path.len()
+        );
+        Some(cache)
+    };
+
+    println!("Analyzing target dpr conditionals...");
+    let assumptions = conditionals::Assumptions::default();
+    let conditional_units = match conditionals::collect_dpr_conditional_units(
+        &target_dpr,
+        &unit_cache,
+        delphi_unit_cache.as_ref(),
+        &assumptions,
+        &mut warnings,
+    ) {
+        Ok(Some(units)) => units,
+        Ok(None) => exit_with_error(format!("no uses list found in {}", target_dpr.display()), 1),
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
+    let buckets = conditionals::bucket_conditionals(&conditional_units);
+
+    print_conditionals_summary(ConditionalsOutput {
+        warnings: &warnings,
+        show_warnings: args.common.show_warnings,
+        pas_scanned: scan.pas_files.len(),
+        dpr_scanned: 1,
+        buckets: &buckets,
+    });
 }
 
 fn run_insert_dependency(args: InsertDependencyArgs) {
@@ -913,6 +1065,14 @@ struct SummaryOutput<'a> {
     search_roots: &'a [PathBuf],
 }
 
+struct ConditionalsOutput<'a> {
+    warnings: &'a [String],
+    show_warnings: bool,
+    pas_scanned: usize,
+    dpr_scanned: usize,
+    buckets: &'a conditionals::ConditionBuckets,
+}
+
 fn print_summary(summary: SummaryOutput<'_>) {
     let SummaryOutput {
         infos,
@@ -959,6 +1119,70 @@ fn print_summary(summary: SummaryOutput<'_>) {
     } else {
         for path in &dpr_summary.updated_paths {
             println!("  {}", display_path(path, search_roots));
+        }
+    }
+}
+
+fn print_conditionals_summary(summary: ConditionalsOutput<'_>) {
+    let ConditionalsOutput {
+        warnings,
+        show_warnings,
+        pas_scanned,
+        dpr_scanned,
+        buckets,
+    } = summary;
+
+    println!();
+    println!("Warnings: {}", warnings.len());
+    if show_warnings && !warnings.is_empty() {
+        println!("Warnings list:");
+        for warning in warnings {
+            println!("  {warning}");
+        }
+    }
+
+    println!();
+    println!("Report:");
+    println!("  pas scanned: {}", pas_scanned);
+    println!("  dpr scanned: {}", dpr_scanned);
+    println!();
+    println!("Unconditional units ({}):", buckets.unconditional.len());
+    if buckets.unconditional.is_empty() {
+        println!("  (none)");
+    } else {
+        for unit in &buckets.unconditional {
+            println!("  {unit}");
+        }
+    }
+
+    if buckets.positive.is_empty() {
+        println!("Units only if X is defined: (none)");
+    } else {
+        for (symbol, units) in &buckets.positive {
+            println!("Units only if {} is defined ({}):", symbol, units.len());
+            for unit in units {
+                println!("  {unit}");
+            }
+        }
+    }
+
+    if buckets.negative.is_empty() {
+        println!("Units only if Y is not defined: (none)");
+    } else {
+        for (symbol, units) in &buckets.negative {
+            println!("Units only if {} is not defined ({}):", symbol, units.len());
+            for unit in units {
+                println!("  {unit}");
+            }
+        }
+    }
+
+    println!("Units with complex conditions ({}):", buckets.complex.len());
+    if buckets.complex.is_empty() {
+        println!("  (none)");
+    } else {
+        for (unit, condition) in &buckets.complex {
+            println!("  {}: {}", unit, condition);
         }
     }
 }
@@ -1232,6 +1456,37 @@ mod tests {
         assert!(
             parsed.is_err(),
             "--ignore-dpr should not parse in fix-dpr mode"
+        );
+    }
+
+    #[test]
+    fn parse_list_conditionals_with_positional_dpr_file() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "list-conditionals",
+            "--search-path",
+            ".",
+            "./app1/App1.dpr",
+        ]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn reject_ignore_dpr_in_list_conditionals_mode() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "list-conditionals",
+            "--search-path",
+            ".",
+            "./app1/App1.dpr",
+            "--ignore-dpr",
+            "./app1/App1.dpr",
+        ]);
+
+        assert!(
+            parsed.is_err(),
+            "--ignore-dpr should not parse in list-conditionals mode"
         );
     }
 

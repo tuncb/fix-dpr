@@ -2,12 +2,13 @@
 
 CLI tool that updates Delphi `.dpr` program files.
 
-It now supports four modes:
+It now supports five modes:
 
 - `add-dependency`: existing behavior. Add a given new unit to `.dpr` files that require it.
 - `insert-dependency`: insert a given new unit into selected `.dpr` files whether or not they currently depend on it, and optionally add that new unit's transitive dependency chain.
 - `delete-dependency`: remove a given unit from selected `.dpr` files and also remove transitive dependencies that are no longer required by any remaining `.dpr` entry.
 - `fix-dpr`: new behavior. Repair one target `.dpr` by traversing dependency chains from its existing `uses` entries and adding missing units found in the scanned search-path unit cache.
+- `list-conditionals`: inspect one target `.dpr` and report unconditional, simple conditional, and complex conditional unit reachability across its dependency graph.
 
 ## Usage
 
@@ -25,6 +26,10 @@ fixdpr delete-dependency OLD_DEPENDENCY --search-path PATH [--search-path PATH] 
 
 ```powershell
 fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--show-infos] [--show-warnings]
+```
+
+```powershell
+fixdpr list-conditionals DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--show-warnings]
 ```
 
 ## Arguments
@@ -56,6 +61,10 @@ fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path P
 ### `fix-dpr` arguments
 
 - `DPR_FILE`: Target `.dpr` file to repair (absolute or relative to the current working directory).
+
+### `list-conditionals` arguments
+
+- `DPR_FILE`: Target `.dpr` file to inspect (absolute or relative to the current working directory).
 
 ### `delete-dependency` arguments
 
@@ -144,6 +153,24 @@ fixdpr fix-dpr `
   --search-path .\repo `
   --delphi-path C:\RADStudio\source\rtl\common `
   --ignore-path .\repo\ignored
+```
+
+List conditional reachability for one `.dpr`:
+
+```powershell
+fixdpr list-conditionals `
+  .\repo\app1\App1.dpr `
+  --search-path .\repo
+```
+
+List conditional reachability with Delphi fallback roots:
+
+```powershell
+fixdpr list-conditionals `
+  .\repo\app1\App1.dpr `
+  --search-path .\repo `
+  --delphi-path C:\RADStudio\source\rtl\common `
+  --show-warnings
 ```
 
 ## Features

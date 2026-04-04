@@ -1451,6 +1451,7 @@ fn collect_introduced_dependencies(
                 name: dep,
                 path: dep_path,
                 uses: Vec::new(),
+                conditional_uses: Vec::new(),
             });
         }
     }
@@ -2171,6 +2172,7 @@ begin end.
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
             uses: Vec::new(),
+            conditional_uses: Vec::new(),
         };
         insert_new_unit(&bytes, &dpr_path, &list, &new_unit, None).unwrap();
 
@@ -2202,6 +2204,7 @@ begin end.
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
             uses: Vec::new(),
+            conditional_uses: Vec::new(),
         };
         insert_new_unit(&bytes, &dpr_path, &list, &new_unit, None).unwrap();
 
@@ -2232,6 +2235,7 @@ begin end.
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
             uses: Vec::new(),
+            conditional_uses: Vec::new(),
         };
         insert_new_unit(&bytes, &dpr_path, &list, &new_unit, Some(insert_after)).unwrap();
 
@@ -2266,6 +2270,7 @@ begin end.
             name: "NewUnit".to_string(),
             path: pas_path.clone(),
             uses: Vec::new(),
+            conditional_uses: Vec::new(),
         };
         insert_new_unit(&bytes, &dpr_path, &list, &new_unit, Some(insert_after)).unwrap();
 
@@ -2548,6 +2553,7 @@ begin end.
             name: "NewUnit".to_string(),
             path: unit_path,
             uses: Vec::new(),
+            conditional_uses: Vec::new(),
         };
         let bytes = fs::read(&dpr_path).unwrap();
         create_uses_section(&bytes, &dpr_path, std::slice::from_ref(&new_unit)).unwrap();

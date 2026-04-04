@@ -883,6 +883,125 @@ fn end_to_end_fix_dpr_rejects_ignore_dpr_flag() {
 }
 
 #[test]
+fn end_to_end_list_conditionals_reports_simple_and_complex_buckets() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_");
+    create_list_conditionals_fixture(&root);
+
+    let target_dpr = root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&root)
+        .arg(&target_dpr)
+        .output()
+        .expect("run fixdpr list-conditionals");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Mode: list-conditionals"), "{stdout}");
+    assert!(stdout.contains("Unconditional units"), "{stdout}");
+    assert!(stdout.contains("  AlwaysUnit"), "{stdout}");
+    assert!(stdout.contains("  SharedAlways"), "{stdout}");
+    assert!(
+        stdout.contains("Units only if DEBUG is defined"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  DebugRoot"), "{stdout}");
+    assert!(stdout.contains("  DebugChild"), "{stdout}");
+    assert!(
+        stdout.contains("Units only if TRACE is not defined"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  TraceOffRoot"), "{stdout}");
+    assert!(stdout.contains("  TraceChild"), "{stdout}");
+    assert!(stdout.contains("  HiddenTraceOff"), "{stdout}");
+    assert!(stdout.contains("Units with complex conditions"), "{stdout}");
+    assert!(
+        stdout.contains("FeatureUnit: DEBUG AND FEATURE"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("ComplexRoot: OUTER AND NOT INNER"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("ComplexChild: OUTER AND NOT INNER"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn end_to_end_list_conditionals_uses_delphi_fallback_resolution() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_delphi_");
+    let project_root = root.join("project");
+    let delphi_root = root.join("delphi");
+    create_list_conditionals_delphi_fixture(&project_root, &delphi_root);
+
+    let target_dpr = project_root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&project_root)
+        .arg(&target_dpr)
+        .arg("--delphi-path")
+        .arg(&delphi_root)
+        .output()
+        .expect("run fixdpr list-conditionals with delphi path");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Units only if DEBUG is defined"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  ExtRoot"), "{stdout}");
+    assert!(stdout.contains("  ExtChild"), "{stdout}");
+}
+
+#[test]
+fn end_to_end_list_conditionals_warns_on_unsupported_directives() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_unsupported_");
+    create_list_conditionals_unsupported_fixture(&root);
+
+    let target_dpr = root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&root)
+        .arg(&target_dpr)
+        .arg("--show-warnings")
+        .output()
+        .expect("run fixdpr list-conditionals with warnings");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Warnings: 1"), "{stdout}");
+    assert!(
+        stdout.contains("unsupported compiler directive DEFINE"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("LeafUnit: UNKNOWN(DEFINE)"), "{stdout}");
+}
+
+#[test]
 fn end_to_end_insert_dependency_targets_path_and_creates_uses_section() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root.join("tests").join("fixtures").join("insert_repo");
@@ -1054,4 +1173,130 @@ fn create_delphi_path_fixture(project_root: &Path, delphi_root: &Path) {
         "unit NewUnit;\ninterface\nimplementation\nend.\n",
     )
     .expect("write NewUnit.pas");
+}
+
+fn create_list_conditionals_fixture(root: &Path) {
+    fs::create_dir_all(root).expect("create root");
+
+    write_file(
+        root,
+        "App.dpr",
+        "program App;\nuses\n  AlwaysUnit in 'AlwaysUnit.pas',\n  {$IFDEF DEBUG} DebugRoot in 'DebugRoot.pas', {$ENDIF}\n  {$IFNDEF TRACE} TraceOffRoot in 'TraceOffRoot.pas', {$ENDIF}\n  {$IFDEF OUTER}{$IFNDEF INNER} ComplexRoot in 'ComplexRoot.pas', {$ENDIF}{$ENDIF};\nbegin\nend.\n",
+    );
+    write_file(
+        root,
+        "AlwaysUnit.pas",
+        "unit AlwaysUnit;\ninterface\nuses SharedAlways;\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "SharedAlways.pas",
+        "unit SharedAlways;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "DebugRoot.pas",
+        "unit DebugRoot;\ninterface\nuses DebugChild, {$IFDEF FEATURE} FeatureUnit, {$ENDIF};\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "DebugChild.pas",
+        "unit DebugChild;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "FeatureUnit.pas",
+        "unit FeatureUnit;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "TraceOffRoot.pas",
+        "unit TraceOffRoot;\ninterface\nuses {$I TraceUses.inc} TraceChild;\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "TraceUses.inc",
+        "{$IFNDEF TRACE} HiddenTraceOff, {$ENDIF}",
+    );
+    write_file(
+        root,
+        "TraceChild.pas",
+        "unit TraceChild;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "HiddenTraceOff.pas",
+        "unit HiddenTraceOff;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "ComplexRoot.pas",
+        "unit ComplexRoot;\ninterface\nuses ComplexChild;\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "ComplexChild.pas",
+        "unit ComplexChild;\ninterface\nuses AlwaysUnit;\nimplementation\nend.\n",
+    );
+}
+
+fn create_list_conditionals_delphi_fixture(project_root: &Path, delphi_root: &Path) {
+    fs::create_dir_all(project_root).expect("create project root");
+    fs::create_dir_all(delphi_root).expect("create delphi root");
+
+    write_file(
+        project_root,
+        "App.dpr",
+        "program App;\nuses\n  LocalUnit in 'LocalUnit.pas',\n  {$IFDEF DEBUG} ExtRoot, {$ENDIF}\n  AlwaysUnit in 'AlwaysUnit.pas';\nbegin\nend.\n",
+    );
+    write_file(
+        project_root,
+        "LocalUnit.pas",
+        "unit LocalUnit;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        project_root,
+        "AlwaysUnit.pas",
+        "unit AlwaysUnit;\ninterface\nimplementation\nend.\n",
+    );
+    write_file(
+        delphi_root,
+        "ExtRoot.pas",
+        "unit ExtRoot;\ninterface\nuses ExtChild;\nimplementation\nend.\n",
+    );
+    write_file(
+        delphi_root,
+        "ExtChild.pas",
+        "unit ExtChild;\ninterface\nimplementation\nend.\n",
+    );
+}
+
+fn create_list_conditionals_unsupported_fixture(root: &Path) {
+    fs::create_dir_all(root).expect("create root");
+
+    write_file(
+        root,
+        "App.dpr",
+        "program App;\nuses\n  RootUnit in 'RootUnit.pas';\nbegin\nend.\n",
+    );
+    write_file(
+        root,
+        "RootUnit.pas",
+        "unit RootUnit;\ninterface\nuses FlaggedUnit in 'FlaggedUnit.pas';\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "FlaggedUnit.pas",
+        "unit FlaggedUnit;\ninterface\n{$DEFINE FEATURE}\nuses LeafUnit in 'LeafUnit.pas';\nimplementation\nend.\n",
+    );
+    write_file(
+        root,
+        "LeafUnit.pas",
+        "unit LeafUnit;\ninterface\nimplementation\nend.\n",
+    );
+}
+
+fn write_file(root: &Path, name: &str, contents: &str) {
+    let path = root.join(name);
+    fs::write(path, contents).expect("write file");
 }

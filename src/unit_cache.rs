@@ -3,7 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::conditionals::{self, Assumptions, ConditionalUse};
 use crate::pas_lex;
+#[cfg(test)]
 use crate::uses_include;
 
 #[derive(Debug, Clone)]
@@ -11,6 +13,7 @@ pub struct UnitFileInfo {
     pub name: String,
     pub path: PathBuf,
     pub uses: Vec<String>,
+    pub conditional_uses: Vec<ConditionalUse>,
 }
 
 #[derive(Debug, Default)]
@@ -41,11 +44,13 @@ pub fn load_unit_file(path: &Path, warnings: &mut Vec<String>) -> io::Result<Opt
         Some(value) => value,
         None => return Ok(None),
     };
-    let uses = parse_unit_uses(path, &bytes, warnings);
+    let conditional_uses = conditionals::parse_unit_conditional_uses(path, &bytes, warnings);
+    let uses = conditionals::flatten_conditional_uses(&conditional_uses, &Assumptions::default());
     Ok(Some(UnitFileInfo {
         name,
         path: path.to_path_buf(),
         uses,
+        conditional_uses,
     }))
 }
 
@@ -133,6 +138,7 @@ fn parse_unit_name_after(bytes: &[u8], mut i: usize) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Section {
     None,
@@ -140,6 +146,7 @@ enum Section {
     Implementation,
 }
 
+#[cfg(test)]
 pub fn parse_unit_uses(path: &Path, bytes: &[u8], warnings: &mut Vec<String>) -> Vec<String> {
     let mut deps = Vec::new();
     let mut i = 0;
@@ -190,6 +197,7 @@ pub fn parse_unit_uses(path: &Path, bytes: &[u8], warnings: &mut Vec<String>) ->
     deps
 }
 
+#[cfg(test)]
 fn parse_uses_fragment_with_includes(
     bytes: &[u8],
     mut i: usize,
@@ -238,6 +246,7 @@ fn parse_uses_fragment_with_includes(
     }
 }
 
+#[cfg(test)]
 fn peek_ident(bytes: &[u8], i: usize) -> Option<(String, usize)> {
     if i < bytes.len() && pas_lex::is_ident_start(bytes[i]) {
         let (token, next) = pas_lex::read_ident(bytes, i);
@@ -246,6 +255,7 @@ fn peek_ident(bytes: &[u8], i: usize) -> Option<(String, usize)> {
     None
 }
 
+#[cfg(test)]
 fn scan_to_delimiter_with_includes(
     bytes: &[u8],
     mut i: usize,
@@ -287,6 +297,7 @@ fn scan_to_delimiter_with_includes(
     (i, None)
 }
 
+#[cfg(test)]
 fn skip_ws_comments_and_includes(
     bytes: &[u8],
     mut i: usize,
@@ -328,6 +339,7 @@ fn skip_ws_comments_and_includes(
     i
 }
 
+#[cfg(test)]
 fn parse_include_entries_for_unit(
     include_name: &str,
     source_path: &Path,
