@@ -2,8 +2,10 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 use pathdiff::diff_paths;
 use std::collections::HashSet;
 use std::env;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 
 mod conditionals;
 mod delphi;
@@ -190,9 +192,62 @@ struct SharedArgs {
 
 #[derive(Args, Debug, Default)]
 struct DependencyLookupArgs {
-    /// Assume compiler symbol is undefined during dependency traversal (repeatable)
-    #[arg(long, value_name = "SYMBOL", action = clap::ArgAction::Append)]
-    assume_off: Vec<String>,
+    /// Assume compiler symbol is on or off during dependency traversal (repeatable)
+    #[arg(long, value_name = "SYMBOL=on|off", action = clap::ArgAction::Append)]
+    assume: Vec<DependencyAssumptionArg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DependencyAssumptionArg {
+    symbol: String,
+    value: conditionals::AssumedValue,
+}
+
+impl fmt::Display for DependencyAssumptionArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", self.symbol, assumed_value_label(self.value))
+    }
+}
+
+impl FromStr for DependencyAssumptionArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("--assume cannot be empty".to_string());
+        }
+
+        let Some((symbol, raw_value)) = trimmed.split_once('=') else {
+            return Err("--assume must use SYMBOL=on|off".to_string());
+        };
+
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return Err("--assume symbol cannot be empty".to_string());
+        }
+
+        let raw_value = raw_value.trim();
+        if raw_value.is_empty() {
+            return Err("--assume value cannot be empty; expected on or off".to_string());
+        }
+
+        let value = match raw_value.to_ascii_lowercase().as_str() {
+            "on" => conditionals::AssumedValue::On,
+            "off" => conditionals::AssumedValue::Off,
+            _ => {
+                return Err(format!(
+                    "--assume value must be 'on' or 'off', got '{}'",
+                    raw_value
+                ));
+            }
+        };
+
+        Ok(Self {
+            symbol: symbol.to_ascii_uppercase(),
+            value,
+        })
+    }
 }
 
 #[derive(Args, Debug)]
@@ -254,11 +309,11 @@ fn run_add_dependency(args: AddDependencyArgs) {
     delphi_roots = dedupe_paths(delphi_roots);
 
     let mut warnings = Vec::new();
-    let dependency_assumptions =
-        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
-            Ok(value) => value,
-            Err(err) => exit_with_error(err, 2),
-        };
+    let dependency_assumptions = match build_dependency_assumptions(&args.dependency_lookup.assume)
+    {
+        Ok(value) => value,
+        Err(err) => exit_with_error(err, 2),
+    };
     let new_dependency_path = match resolve_new_dependency_path(&args.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -297,9 +352,9 @@ fn run_add_dependency(args: AddDependencyArgs) {
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }
-    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
-    if !assume_off_display.is_empty() {
-        println!("Assuming off: {}", assume_off_display);
+    let assume_display = format_assumptions(&args.dependency_lookup.assume);
+    if !assume_display.is_empty() {
+        println!("Assumptions: {}", assume_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -478,11 +533,11 @@ fn run_fix_dpr(args: FixDprArgs) {
         exit_with_error(err, 2);
     }
     let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
-    let dependency_assumptions =
-        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
-            Ok(value) => value,
-            Err(err) => exit_with_error(err, 2),
-        };
+    let dependency_assumptions = match build_dependency_assumptions(&args.dependency_lookup.assume)
+    {
+        Ok(value) => value,
+        Err(err) => exit_with_error(err, 2),
+    };
 
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Mode: fix-dpr");
@@ -505,9 +560,9 @@ fn run_fix_dpr(args: FixDprArgs) {
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }
-    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
-    if !assume_off_display.is_empty() {
-        println!("Assuming off: {}", assume_off_display);
+    let assume_display = format_assumptions(&args.dependency_lookup.assume);
+    if !assume_display.is_empty() {
+        println!("Assumptions: {}", assume_display);
     }
     let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
         Ok(result) => result,
@@ -759,11 +814,11 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
     delphi_roots = dedupe_paths(delphi_roots);
 
     let mut warnings = Vec::new();
-    let dependency_assumptions =
-        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
-            Ok(value) => value,
-            Err(err) => exit_with_error(err, 2),
-        };
+    let dependency_assumptions = match build_dependency_assumptions(&args.dependency_lookup.assume)
+    {
+        Ok(value) => value,
+        Err(err) => exit_with_error(err, 2),
+    };
     let new_dependency_path = match resolve_new_dependency_path(&args.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -814,9 +869,9 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }
-    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
-    if !assume_off_display.is_empty() {
-        println!("Assuming off: {}", assume_off_display);
+    let assume_display = format_assumptions(&args.dependency_lookup.assume);
+    if !assume_display.is_empty() {
+        println!("Assumptions: {}", assume_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -966,11 +1021,11 @@ fn run_delete_dependency(args: DeleteDependencyArgs) {
     delphi_roots.append(&mut delphi_roots_from_version);
     delphi_roots = dedupe_paths(delphi_roots);
 
-    let dependency_assumptions =
-        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
-            Ok(value) => value,
-            Err(err) => exit_with_error(err, 2),
-        };
+    let dependency_assumptions = match build_dependency_assumptions(&args.dependency_lookup.assume)
+    {
+        Ok(value) => value,
+        Err(err) => exit_with_error(err, 2),
+    };
     let old_dependency_path = match resolve_new_dependency_path(&args.old_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -1010,9 +1065,9 @@ fn run_delete_dependency(args: DeleteDependencyArgs) {
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
     }
-    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
-    if !assume_off_display.is_empty() {
-        println!("Assuming off: {}", assume_off_display);
+    let assume_display = format_assumptions(&args.dependency_lookup.assume);
+    if !assume_display.is_empty() {
+        println!("Assumptions: {}", assume_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -1336,16 +1391,43 @@ fn format_values(values: &[String]) -> String {
     entries.join(", ")
 }
 
+fn format_assumptions(values: &[DependencyAssumptionArg]) -> String {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for value in values {
+        if seen.insert(value.symbol.clone()) {
+            entries.push(value.to_string());
+        }
+    }
+
+    entries.join(", ")
+}
+
+fn assumed_value_label(value: conditionals::AssumedValue) -> &'static str {
+    match value {
+        conditionals::AssumedValue::On => "on",
+        conditionals::AssumedValue::Off => "off",
+    }
+}
+
 fn build_dependency_assumptions(
-    assume_off: &[String],
+    assume: &[DependencyAssumptionArg],
 ) -> Result<conditionals::Assumptions, String> {
     let mut assumptions = conditionals::Assumptions::default();
-    for symbol in assume_off {
-        let trimmed = symbol.trim();
-        if trimmed.is_empty() {
-            return Err("--assume-off cannot be empty".to_string());
+    for entry in assume {
+        if let Some(previous) = assumptions.get(&entry.symbol) {
+            if previous != entry.value {
+                return Err(format!(
+                    "--assume {} conflicts with earlier {}={}",
+                    entry,
+                    entry.symbol,
+                    assumed_value_label(previous)
+                ));
+            }
+            continue;
         }
-        assumptions.set(trimmed, conditionals::AssumedValue::Off);
+        assumptions.set(&entry.symbol, entry.value);
     }
     Ok(assumptions)
 }
@@ -1453,7 +1535,8 @@ fn exit_with_error(message: impl AsRef<str>, code: i32) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{build_dependency_assumptions, Cli, DependencyAssumptionArg};
+    use crate::conditionals::AssumedValue;
     use clap::Parser;
 
     #[test]
@@ -1484,18 +1567,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_add_dependency_with_assume_off() {
+    fn parse_add_dependency_with_assume() {
         let parsed = Cli::try_parse_from([
             "fixdpr",
             "add-dependency",
             "--search-path",
             ".",
-            "--assume-off",
-            "DEBUG",
+            "--assume",
+            "DEBUG=on",
             "./common/NewUnit.pas",
         ]);
 
         assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn reject_add_dependency_with_invalid_assume_value() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "add-dependency",
+            "--search-path",
+            ".",
+            "--assume",
+            "DEBUG=maybe",
+            "./common/NewUnit.pas",
+        ]);
+
+        assert!(parsed.is_err(), "invalid assume value should not parse");
+    }
+
+    #[test]
+    fn reject_add_dependency_with_missing_assume_assignment() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "add-dependency",
+            "--search-path",
+            ".",
+            "--assume",
+            "DEBUG",
+            "./common/NewUnit.pas",
+        ]);
+
+        assert!(
+            parsed.is_err(),
+            "missing assume assignment should not parse"
+        );
     }
 
     #[test]
@@ -1537,14 +1653,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_fix_dpr_with_assume_off() {
+    fn parse_fix_dpr_with_assume() {
         let parsed = Cli::try_parse_from([
             "fixdpr",
             "fix-dpr",
             "--search-path",
             ".",
-            "--assume-off",
-            "DEBUG",
+            "--assume",
+            "TRACE=off",
             "./app1/App1.dpr",
         ]);
 
@@ -1601,21 +1717,52 @@ mod tests {
     }
 
     #[test]
-    fn reject_assume_off_in_list_conditionals_mode() {
+    fn reject_assume_in_list_conditionals_mode() {
         let parsed = Cli::try_parse_from([
             "fixdpr",
             "list-conditionals",
             "--search-path",
             ".",
             "./app1/App1.dpr",
-            "--assume-off",
-            "DEBUG",
+            "--assume",
+            "DEBUG=off",
         ]);
 
         assert!(
             parsed.is_err(),
-            "--assume-off should not parse in list-conditionals mode"
+            "--assume should not parse in list-conditionals mode"
         );
+    }
+
+    #[test]
+    fn build_dependency_assumptions_applies_normalized_on_and_off_values() {
+        let assumptions = build_dependency_assumptions(&[
+            " debug = on "
+                .parse::<DependencyAssumptionArg>()
+                .expect("parse DEBUG=on"),
+            "trace=off"
+                .parse::<DependencyAssumptionArg>()
+                .expect("parse TRACE=off"),
+        ])
+        .expect("build assumptions");
+
+        assert_eq!(assumptions.get("DEBUG"), Some(AssumedValue::On));
+        assert_eq!(assumptions.get("trace"), Some(AssumedValue::Off));
+    }
+
+    #[test]
+    fn build_dependency_assumptions_rejects_conflicting_duplicate_symbols() {
+        let err = build_dependency_assumptions(&[
+            "DEBUG=on"
+                .parse::<DependencyAssumptionArg>()
+                .expect("parse DEBUG=on"),
+            "debug=off"
+                .parse::<DependencyAssumptionArg>()
+                .expect("parse debug=off"),
+        ])
+        .expect_err("conflicting duplicate assumptions should fail");
+
+        assert!(err.contains("conflicts"), "{err}");
     }
 
     #[test]

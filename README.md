@@ -13,19 +13,19 @@ It now supports five modes:
 ## Usage
 
 ```powershell
-fixdpr add-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume-off SYMBOL] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
+fixdpr add-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume SYMBOL=on|off] [--disable-introduced-dependencies] [--fix-updated-dprs] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
-fixdpr insert-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] (--target-path PATH | --target-dpr DPR_FILE) [--target-path PATH] [--target-dpr DPR_FILE] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume-off SYMBOL] [--disable-introduced-dependencies] [--show-infos] [--show-warnings]
+fixdpr insert-dependency NEW_DEPENDENCY --search-path PATH [--search-path PATH] (--target-path PATH | --target-dpr DPR_FILE) [--target-path PATH] [--target-dpr DPR_FILE] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume SYMBOL=on|off] [--disable-introduced-dependencies] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
-fixdpr delete-dependency OLD_DEPENDENCY --search-path PATH [--search-path PATH] (--target-path PATH | --target-dpr DPR_FILE) [--target-path PATH] [--target-dpr DPR_FILE] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume-off SYMBOL] [--show-infos] [--show-warnings]
+fixdpr delete-dependency OLD_DEPENDENCY --search-path PATH [--search-path PATH] (--target-path PATH | --target-dpr DPR_FILE) [--target-path PATH] [--target-dpr DPR_FILE] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--ignore-dpr GLOB] [--assume SYMBOL=on|off] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
-fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--assume-off SYMBOL] [--show-infos] [--show-warnings]
+fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--assume SYMBOL=on|off] [--show-infos] [--show-warnings]
 ```
 
 ```powershell
@@ -47,7 +47,7 @@ fixdpr list-conditionals DPR_FILE --search-path PATH [--search-path PATH] [--del
 
 Supported by `add-dependency`, `insert-dependency`, `delete-dependency`, and `fix-dpr`:
 
-- `--assume-off SYMBOL`: Optional compiler symbol to treat as undefined during dependency traversal; can be repeated. Conditional dependency edges guarded by these symbols are ignored when building dependency chains.
+- `--assume SYMBOL=on|off`: Optional compiler symbol assumption to apply during dependency traversal; can be repeated. `off` suppresses dependency edges that become unreachable, while `on` suppresses inverse branches such as `{$IFNDEF SYMBOL}`. Conflicting assumptions for the same symbol are rejected.
 
 ### `add-dependency` arguments
 
@@ -103,7 +103,7 @@ Add dependency while ignoring `DEBUG`-only dependency edges:
 fixdpr add-dependency `
   .\repo\common\NewUnit.pas `
   --search-path .\repo `
-  --assume-off DEBUG
+  --assume DEBUG=off
 ```
 
 Insert dependency into all application `.dpr` files under one subtree:
@@ -170,14 +170,14 @@ fixdpr fix-dpr `
   --ignore-path .\repo\ignored
 ```
 
-Repair one `.dpr` while assuming some compiler symbols are off:
+Repair one `.dpr` while assuming compiler symbol states:
 
 ```powershell
 fixdpr fix-dpr `
   .\repo\app1\App1.dpr `
   --search-path .\repo `
-  --assume-off DEBUG `
-  --assume-off TRACE
+  --assume DEBUG=on `
+  --assume TRACE=off
 ```
 
 List conditional reachability for one `.dpr`:

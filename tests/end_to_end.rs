@@ -102,7 +102,7 @@ fn end_to_end_add_dependency_uses_conditional_dependents_by_default() {
 }
 
 #[test]
-fn end_to_end_add_dependency_assume_off_skips_conditional_dependents() {
+fn end_to_end_add_dependency_assume_debug_off_skips_conditional_dependents() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
         .join("tests")
@@ -116,11 +116,11 @@ fn end_to_end_add_dependency_assume_off_skips_conditional_dependents() {
         .arg("add-dependency")
         .arg("--search-path")
         .arg(&temp_root)
-        .arg("--assume-off")
-        .arg("DEBUG")
+        .arg("--assume")
+        .arg("DEBUG=off")
         .arg(&new_dependency)
         .output()
-        .expect("run fixdpr add-dependency with assume-off");
+        .expect("run fixdpr add-dependency with DEBUG=off assumption");
 
     assert!(
         output.status.success(),
@@ -138,6 +138,46 @@ fn end_to_end_add_dependency_assume_off_skips_conditional_dependents() {
     assert_eq!(
         actual, expected,
         "assumed-off branch should not trigger insertion"
+    );
+}
+
+#[test]
+fn end_to_end_add_dependency_assume_debug_on_skips_negative_conditional_dependents() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("assume_on_repo");
+    let temp_root = temp_dir("fixdpr_e2e_assume_on_disabled_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("shared").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--assume")
+        .arg("DEBUG=on")
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr add-dependency with DEBUG=on assumption");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app").join("App.dpr")).expect("read actual dpr"),
+    );
+    let expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app").join("App.dpr")).expect("read expected dpr"),
+    );
+    assert_eq!(
+        actual, expected,
+        "assumed-on symbol should disable inverse branch insertion"
     );
 }
 
@@ -1123,8 +1163,8 @@ fn end_to_end_list_conditionals_supports_if_elseif_and_ifopt() {
 }
 
 #[test]
-fn end_to_end_list_conditionals_rejects_assume_off_flag() {
-    let root = temp_dir("fixdpr_e2e_list_conditionals_assume_off_");
+fn end_to_end_list_conditionals_rejects_assume_flag() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_assume_");
     create_list_conditionals_fixture(&root);
 
     let target_dpr = root.join("App.dpr");
@@ -1133,10 +1173,10 @@ fn end_to_end_list_conditionals_rejects_assume_off_flag() {
         .arg("--search-path")
         .arg(&root)
         .arg(&target_dpr)
-        .arg("--assume-off")
-        .arg("DEBUG")
+        .arg("--assume")
+        .arg("DEBUG=off")
         .output()
-        .expect("run fixdpr list-conditionals with unsupported assume-off flag");
+        .expect("run fixdpr list-conditionals with unsupported assume flag");
 
     assert!(
         !output.status.success(),
@@ -1147,7 +1187,7 @@ fn end_to_end_list_conditionals_rejects_assume_off_flag() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unexpected argument '--assume-off'"),
+        stderr.contains("unexpected argument '--assume'"),
         "{stderr}"
     );
 }
