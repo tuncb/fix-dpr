@@ -5,6 +5,24 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn end_to_end_version_reports_manifest_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("--version")
+        .output()
+        .expect("run fixdpr --version");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, format!("fixdpr {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn end_to_end_updates_expected_dprs() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root
