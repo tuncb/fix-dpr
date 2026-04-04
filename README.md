@@ -29,7 +29,7 @@ fixdpr fix-dpr DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path P
 ```
 
 ```powershell
-fixdpr list-conditionals DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--assume-off SYMBOL] [--show-warnings]
+fixdpr list-conditionals DPR_FILE --search-path PATH [--search-path PATH] [--delphi-path PATH] [--delphi-version VERSION] [--ignore-path PATH] [--show-warnings]
 ```
 
 ## Arguments
@@ -42,6 +42,11 @@ fixdpr list-conditionals DPR_FILE --search-path PATH [--search-path PATH] [--del
 - `--show-warnings`: Show detailed warning messages.
 - `--delphi-path PATH`: Optional fallback source root for Delphi/VCL units; can be repeated. Units in these roots are used only for dependency resolution fallback and are not scanned for `.dpr` updates.
 - `--delphi-version VERSION`: Optional Delphi/BDS version to resolve from Windows registry and use `<BDS Root>\source` as fallback roots; can be repeated. Accepts both `22.0` and `22` forms.
+
+### Dependency traversal arguments
+
+Supported by `add-dependency`, `insert-dependency`, `delete-dependency`, and `fix-dpr`:
+
 - `--assume-off SYMBOL`: Optional compiler symbol to treat as undefined during dependency traversal; can be repeated. Conditional dependency edges guarded by these symbols are ignored when building dependency chains.
 
 ### `add-dependency` arguments

@@ -156,9 +156,6 @@ struct ListConditionalsArgs {
     #[command(flatten)]
     common: SharedArgs,
 
-    #[command(flatten)]
-    dependency_lookup: DependencyLookupArgs,
-
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     delphi_path: Vec<String>,
@@ -624,11 +621,7 @@ fn run_list_conditionals(args: ListConditionalsArgs) {
         exit_with_error(err, 2);
     }
     let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
-    let dependency_assumptions =
-        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
-            Ok(value) => value,
-            Err(err) => exit_with_error(err, 2),
-        };
+    let dependency_assumptions = conditionals::Assumptions::default();
 
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Mode: list-conditionals");
@@ -650,10 +643,6 @@ fn run_list_conditionals(args: ListConditionalsArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
-    }
-    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
-    if !assume_off_display.is_empty() {
-        println!("Assuming off: {}", assume_off_display);
     }
 
     let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
@@ -1608,6 +1597,24 @@ mod tests {
         assert!(
             parsed.is_err(),
             "--ignore-dpr should not parse in list-conditionals mode"
+        );
+    }
+
+    #[test]
+    fn reject_assume_off_in_list_conditionals_mode() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "list-conditionals",
+            "--search-path",
+            ".",
+            "./app1/App1.dpr",
+            "--assume-off",
+            "DEBUG",
+        ]);
+
+        assert!(
+            parsed.is_err(),
+            "--assume-off should not parse in list-conditionals mode"
         );
     }
 

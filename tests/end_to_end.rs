@@ -1123,6 +1123,36 @@ fn end_to_end_list_conditionals_supports_if_elseif_and_ifopt() {
 }
 
 #[test]
+fn end_to_end_list_conditionals_rejects_assume_off_flag() {
+    let root = temp_dir("fixdpr_e2e_list_conditionals_assume_off_");
+    create_list_conditionals_fixture(&root);
+
+    let target_dpr = root.join("App.dpr");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("list-conditionals")
+        .arg("--search-path")
+        .arg(&root)
+        .arg(&target_dpr)
+        .arg("--assume-off")
+        .arg("DEBUG")
+        .output()
+        .expect("run fixdpr list-conditionals with unsupported assume-off flag");
+
+    assert!(
+        !output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--assume-off'"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn end_to_end_list_conditionals_keeps_unsupported_if_branch_local() {
     let root = temp_dir("fixdpr_e2e_list_conditionals_if_fallback_");
     create_list_conditionals_if_fallback_fixture(&root);
