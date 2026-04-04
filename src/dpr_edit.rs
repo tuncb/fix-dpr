@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::conditionals::{self, Assumptions, EvalResult};
 use crate::pas_lex;
 use crate::unit_cache::{self, UnitCache, UnitFileInfo};
 use crate::uses_include;
@@ -42,6 +43,7 @@ pub fn update_dpr_files(
     mut delphi_cache: Option<&mut UnitCache>,
     new_unit: &UnitFileInfo,
     add_introduced_dependencies: bool,
+    assumptions: &Assumptions,
 ) -> io::Result<DprUpdateSummary> {
     let mut summary = DprUpdateSummary {
         scanned: 0,
@@ -73,6 +75,12 @@ pub fn update_dpr_files(
         };
         let mut current_bytes = bytes;
         let mut current_list = list;
+        let active_root_names = collect_active_dpr_entry_names(
+            path,
+            &current_bytes,
+            assumptions,
+            &mut summary.warnings,
+        );
 
         let project_map = build_project_map(
             path,
@@ -85,6 +93,9 @@ pub fn update_dpr_files(
             .entries
             .iter()
             .any(|entry| entry.name.eq_ignore_ascii_case(&new_unit.name));
+        let has_active_new_unit = active_root_names.as_ref().map_or(has_new_unit, |names| {
+            names.contains(&new_unit.name.to_ascii_lowercase())
+        });
 
         let mut needs_new_unit = false;
         let mut insert_after = None;
@@ -98,10 +109,14 @@ pub fn update_dpr_files(
                 delphi_cache.as_deref_mut(),
                 &project_map,
                 new_unit,
+                assumptions,
                 &mut summary.warnings,
             )?;
 
             for entry in &current_list.entries {
+                if !is_active_dpr_entry(active_root_names.as_ref(), entry) {
+                    continue;
+                }
                 let key = entry.name.to_ascii_lowercase();
                 if let Some(path) = project_map.get(&key) {
                     if let Some(&id) = dependents.id_by_path.get(path) {
@@ -116,7 +131,12 @@ pub fn update_dpr_files(
             if !needs_new_unit {
                 continue;
             }
-            insert_after = find_direct_introducer_index(&current_list, &project_map, &dependents);
+            insert_after = find_direct_introducer_index(
+                &current_list,
+                &project_map,
+                &dependents,
+                active_root_names.as_ref(),
+            );
         }
 
         let mut dpr_updated = false;
@@ -166,12 +186,13 @@ pub fn update_dpr_files(
             }
         }
 
-        if add_introduced_dependencies && (needs_new_unit || has_new_unit) {
+        if add_introduced_dependencies && (needs_new_unit || has_active_new_unit) {
             let introduced = collect_introduced_dependencies(
                 project_cache,
                 delphi_cache.as_deref_mut(),
                 &project_map,
                 new_unit,
+                assumptions,
                 &mut summary.warnings,
             )?;
             if has_new_unit && last_inserted_name.is_none() {
@@ -253,6 +274,7 @@ pub fn insert_dependency_files(
     mut delphi_cache: Option<&mut UnitCache>,
     new_unit: &UnitFileInfo,
     add_introduced_dependencies: bool,
+    assumptions: &Assumptions,
 ) -> io::Result<DprUpdateSummary> {
     let mut summary = DprUpdateSummary {
         scanned: 0,
@@ -343,6 +365,7 @@ pub fn insert_dependency_files(
                         delphi_cache.as_deref_mut(),
                         &project_map,
                         new_unit,
+                        assumptions,
                         &mut summary.warnings,
                     )?;
 
@@ -416,10 +439,19 @@ pub fn insert_dependency_files(
         };
 
         let mut dpr_updated = false;
+        let active_root_names = collect_active_dpr_entry_names(
+            path,
+            &current_bytes,
+            assumptions,
+            &mut summary.warnings,
+        );
         let has_new_unit = current_list
             .entries
             .iter()
             .any(|entry| entry.name.eq_ignore_ascii_case(&new_unit.name));
+        let has_active_new_unit = active_root_names.as_ref().map_or(has_new_unit, |names| {
+            names.contains(&new_unit.name.to_ascii_lowercase())
+        });
         let mut last_inserted_name = None;
 
         if !has_new_unit {
@@ -461,7 +493,7 @@ pub fn insert_dependency_files(
             }
         }
 
-        if add_introduced_dependencies && (dpr_updated || has_new_unit) {
+        if add_introduced_dependencies && (dpr_updated || has_active_new_unit) {
             let project_map = build_project_map(
                 path,
                 &current_list,
@@ -474,9 +506,10 @@ pub fn insert_dependency_files(
                 delphi_cache.as_deref_mut(),
                 &project_map,
                 new_unit,
+                assumptions,
                 &mut summary.warnings,
             )?;
-            if has_new_unit && last_inserted_name.is_none() {
+            if has_active_new_unit && last_inserted_name.is_none() {
                 last_inserted_name = Some(new_unit.name.clone());
             }
 
@@ -553,6 +586,7 @@ pub fn fix_dpr_file(
     dpr_path: &Path,
     project_cache: &UnitCache,
     delphi_cache: Option<&UnitCache>,
+    assumptions: &Assumptions,
 ) -> io::Result<DprUpdateSummary> {
     let dpr_path = unit_cache::canonicalize_if_exists(dpr_path);
     let mut summary = DprUpdateSummary {
@@ -597,12 +631,19 @@ pub fn fix_dpr_file(
         delphi_cache,
         &mut summary.warnings,
     );
+    let active_root_names = collect_active_dpr_entry_names(
+        &dpr_path,
+        &current_bytes,
+        assumptions,
+        &mut summary.warnings,
+    );
     let root_paths = collect_fix_root_paths(
         &dpr_path,
         &current_list,
         &project_map,
         project_cache,
         delphi_cache,
+        active_root_names.as_ref(),
         &mut summary.warnings,
     );
     if root_paths.is_empty() {
@@ -614,8 +655,9 @@ pub fn fix_dpr_file(
         &existing_names,
         project_cache,
         delphi_cache,
+        assumptions,
         &mut summary.warnings,
-    );
+    )?;
     if missing_units.is_empty() {
         return Ok(summary);
     }
@@ -688,6 +730,7 @@ pub fn delete_dependency_files(
     project_cache: &UnitCache,
     delphi_cache: Option<&UnitCache>,
     old_dependency_name: &str,
+    assumptions: &Assumptions,
 ) -> io::Result<DprUpdateSummary> {
     let mut summary = DprUpdateSummary {
         scanned: 0,
@@ -713,6 +756,8 @@ pub fn delete_dependency_files(
         let Some(list) = parse_dpr_uses(path, &bytes, &mut summary.warnings) else {
             continue;
         };
+        let active_root_names =
+            collect_active_dpr_entry_names(path, &bytes, assumptions, &mut summary.warnings);
 
         let removal_set = match collect_cascading_delete_names(
             path,
@@ -720,6 +765,8 @@ pub fn delete_dependency_files(
             project_cache,
             delphi_cache,
             old_dependency_name,
+            active_root_names.as_ref(),
+            assumptions,
             &mut summary.warnings,
         )? {
             Some(set) => set,
@@ -841,22 +888,29 @@ fn render_uses_entries(list: &UsesList, entries: &[&UsesEntry]) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_cascading_delete_names(
     dpr_path: &Path,
     list: &UsesList,
     project_cache: &UnitCache,
     delphi_cache: Option<&UnitCache>,
     old_dependency_name: &str,
+    active_root_names: Option<&HashSet<String>>,
+    assumptions: &Assumptions,
     warnings: &mut Vec<String>,
 ) -> io::Result<Option<HashSet<String>>> {
     let root_key = old_dependency_name.to_ascii_lowercase();
-    let mut present = HashSet::new();
+    let mut all_present = HashSet::new();
     for entry in &list.entries {
-        present.insert(entry.name.to_ascii_lowercase());
+        all_present.insert(entry.name.to_ascii_lowercase());
     }
-    if !present.contains(&root_key) {
+    if !all_present.contains(&root_key) {
         return Ok(None);
     }
+    let mut present = active_root_names
+        .cloned()
+        .unwrap_or_else(|| all_present.clone());
+    present.insert(root_key.clone());
 
     let project_map = build_project_map(dpr_path, list, project_cache, delphi_cache, warnings);
     let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
@@ -869,8 +923,13 @@ fn collect_cascading_delete_names(
         let Some(unit_path) = project_map.get(key) else {
             continue;
         };
-        let uses = match load_unit_uses_readonly(project_cache, delphi_cache, unit_path, warnings)?
-        {
+        let uses = match load_unit_uses_readonly(
+            project_cache,
+            delphi_cache,
+            unit_path,
+            warnings,
+            assumptions,
+        )? {
             Some(value) => value,
             None => continue,
         };
@@ -920,18 +979,20 @@ fn load_unit_uses_readonly(
     delphi_cache: Option<&UnitCache>,
     unit_path: &Path,
     warnings: &mut Vec<String>,
+    assumptions: &Assumptions,
 ) -> io::Result<Option<Vec<String>>> {
     let canonical = unit_cache::canonicalize_if_exists(unit_path);
     if let Some(info) = project_cache.by_path.get(&canonical) {
-        return Ok(Some(info.uses.clone()));
+        return Ok(Some(flatten_unit_uses(info, assumptions)));
     }
     if let Some(delphi_cache) = delphi_cache {
         if let Some(info) = delphi_cache.by_path.get(&canonical) {
-            return Ok(Some(info.uses.clone()));
+            return Ok(Some(flatten_unit_uses(info, assumptions)));
         }
     }
 
-    Ok(unit_cache::load_unit_file(&canonical, warnings)?.map(|info| info.uses))
+    Ok(unit_cache::load_unit_file(&canonical, warnings)?
+        .map(|info| conditionals::flatten_conditional_uses(&info.conditional_uses, assumptions)))
 }
 
 fn collect_fix_root_paths(
@@ -940,12 +1001,16 @@ fn collect_fix_root_paths(
     project_map: &HashMap<String, PathBuf>,
     project_cache: &UnitCache,
     delphi_cache: Option<&UnitCache>,
+    active_root_names: Option<&HashSet<String>>,
     warnings: &mut Vec<String>,
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
 
     for entry in &list.entries {
+        if !is_active_dpr_entry(active_root_names, entry) {
+            continue;
+        }
         let key = entry.name.to_ascii_lowercase();
         let Some(path) = project_map.get(&key) else {
             continue;
@@ -972,8 +1037,9 @@ fn collect_missing_dpr_dependencies(
     existing_names: &HashSet<String>,
     project_cache: &UnitCache,
     delphi_cache: Option<&UnitCache>,
+    assumptions: &Assumptions,
     warnings: &mut Vec<String>,
-) -> Vec<UnitFileInfo> {
+) -> io::Result<Vec<UnitFileInfo>> {
     let mut queue = VecDeque::new();
     let mut seen_paths = HashSet::new();
     let mut missing_names = HashSet::new();
@@ -986,11 +1052,18 @@ fn collect_missing_dpr_dependencies(
     }
 
     while let Some(unit_path) = queue.pop_front() {
-        let Some(unit_info) = lookup_unit_info(project_cache, delphi_cache, &unit_path) else {
-            continue;
+        let uses = match load_unit_uses_readonly(
+            project_cache,
+            delphi_cache,
+            &unit_path,
+            warnings,
+            assumptions,
+        )? {
+            Some(value) => value,
+            None => continue,
         };
 
-        for dep in &unit_info.uses {
+        for dep in uses {
             let dep_key = dep.to_ascii_lowercase();
             let dep_path = match resolve_by_name(project_cache, delphi_cache, dep.as_str()) {
                 ResolveByName::Unique { path, .. } => path,
@@ -1026,7 +1099,7 @@ fn collect_missing_dpr_dependencies(
         }
     }
 
-    missing_units
+    Ok(missing_units)
 }
 
 fn reload_dpr_state(
@@ -1036,6 +1109,39 @@ fn reload_dpr_state(
     let bytes = fs::read(path)?;
     let list = parse_dpr_uses(path, &bytes, warnings);
     Ok(list.map(|list| (bytes, list)))
+}
+
+fn flatten_unit_uses(info: &UnitFileInfo, assumptions: &Assumptions) -> Vec<String> {
+    conditionals::flatten_conditional_uses(&info.conditional_uses, assumptions)
+}
+
+fn collect_active_dpr_entry_names(
+    dpr_path: &Path,
+    bytes: &[u8],
+    assumptions: &Assumptions,
+    warnings: &mut Vec<String>,
+) -> Option<HashSet<String>> {
+    let entries = conditionals::parse_dpr_conditional_uses(dpr_path, bytes, warnings)?;
+    Some(
+        entries
+            .into_iter()
+            .filter(|entry| evaluate_entry_condition(entry, assumptions))
+            .map(|entry| entry.unit_name.to_ascii_lowercase())
+            .collect(),
+    )
+}
+
+fn evaluate_entry_condition(
+    entry: &conditionals::ConditionalUse,
+    assumptions: &Assumptions,
+) -> bool {
+    conditionals::evaluate_condition(&entry.condition, assumptions) != EvalResult::Never
+}
+
+fn is_active_dpr_entry(active_root_names: Option<&HashSet<String>>, entry: &UsesEntry) -> bool {
+    active_root_names
+        .map(|names| names.contains(&entry.name.to_ascii_lowercase()))
+        .unwrap_or(true)
 }
 
 fn has_unit_path(project_cache: &UnitCache, delphi_cache: Option<&UnitCache>, path: &Path) -> bool {
@@ -1065,9 +1171,13 @@ fn find_direct_introducer_index(
     list: &UsesList,
     project_map: &HashMap<String, PathBuf>,
     dependents: &ProjectDependents,
+    active_root_names: Option<&HashSet<String>>,
 ) -> Option<usize> {
     list.entries.iter().enumerate().find_map(|(idx, entry)| {
         if entry.from_include {
+            return None;
+        }
+        if !is_active_dpr_entry(active_root_names, entry) {
             return None;
         }
         let key = entry.name.to_ascii_lowercase();
@@ -1246,6 +1356,7 @@ fn compute_project_dependents(
     mut delphi_cache: Option<&mut UnitCache>,
     project_map: &HashMap<String, PathBuf>,
     new_unit: &UnitFileInfo,
+    assumptions: &Assumptions,
     warnings: &mut Vec<String>,
 ) -> io::Result<ProjectDependents> {
     let mut id_by_path = HashMap::new();
@@ -1270,6 +1381,7 @@ fn compute_project_dependents(
             delphi_cache.as_deref_mut(),
             &unit_path,
             warnings,
+            assumptions,
         )? {
             Some(uses) => uses,
             None => {
@@ -1372,19 +1484,21 @@ fn load_unit_uses(
     delphi_cache: Option<&mut UnitCache>,
     unit_path: &Path,
     warnings: &mut Vec<String>,
+    assumptions: &Assumptions,
 ) -> io::Result<Option<Vec<String>>> {
     let canonical = unit_cache::canonicalize_if_exists(unit_path);
     if let Some(info) = project_cache.by_path.get(&canonical) {
-        return Ok(Some(info.uses.clone()));
+        return Ok(Some(flatten_unit_uses(info, assumptions)));
     }
 
     if let Some(delphi_cache) = delphi_cache {
         if let Some(info) = delphi_cache.by_path.get(&canonical) {
-            return Ok(Some(info.uses.clone()));
+            return Ok(Some(flatten_unit_uses(info, assumptions)));
         }
     }
 
-    Ok(unit_cache::load_unit_file(&canonical, warnings)?.map(|info| info.uses))
+    Ok(unit_cache::load_unit_file(&canonical, warnings)?
+        .map(|info| conditionals::flatten_conditional_uses(&info.conditional_uses, assumptions)))
 }
 
 fn collect_introduced_dependencies(
@@ -1392,6 +1506,7 @@ fn collect_introduced_dependencies(
     mut delphi_cache: Option<&mut UnitCache>,
     project_map: &HashMap<String, PathBuf>,
     new_unit: &UnitFileInfo,
+    assumptions: &Assumptions,
     warnings: &mut Vec<String>,
 ) -> io::Result<Vec<UnitFileInfo>> {
     let mut queue = VecDeque::new();
@@ -1409,6 +1524,7 @@ fn collect_introduced_dependencies(
             delphi_cache.as_deref_mut(),
             &unit_path,
             warnings,
+            assumptions,
         )? {
             Some(uses) => uses,
             None => {
@@ -2403,12 +2519,14 @@ begin end.
             .unwrap()
             .expect("new unit");
         let project_map = HashMap::new();
+        let assumptions = Assumptions::default();
 
         let introduced = collect_introduced_dependencies(
             &mut project_cache,
             None,
             &project_map,
             &new_unit,
+            &assumptions,
             &mut warnings,
         )
         .unwrap();
@@ -2417,6 +2535,46 @@ begin end.
             .map(|unit| unit.name.to_ascii_lowercase())
             .collect();
         assert_eq!(names, vec!["midunit", "baseunit"]);
+    }
+
+    #[test]
+    fn collect_introduced_dependencies_respects_assume_off() {
+        let root = temp_dir();
+        let new_path = root.join("NewUnit.pas");
+        let debug_mid_path = root.join("DebugMid.pas");
+        fs::write(
+            &new_path,
+            "unit NewUnit;\ninterface\nuses {$IFDEF DEBUG} DebugMid {$ENDIF};\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &debug_mid_path,
+            "unit DebugMid;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let mut project_cache =
+            unit_cache::build_unit_cache(&[new_path.clone(), debug_mid_path], &mut warnings)
+                .unwrap();
+        let new_unit = unit_cache::load_unit_file(&new_path, &mut warnings)
+            .unwrap()
+            .expect("new unit");
+        let project_map = HashMap::new();
+        let mut assumptions = Assumptions::default();
+        assumptions.set("DEBUG", conditionals::AssumedValue::Off);
+
+        let introduced = collect_introduced_dependencies(
+            &mut project_cache,
+            None,
+            &project_map,
+            &new_unit,
+            &assumptions,
+            &mut warnings,
+        )
+        .unwrap();
+
+        assert!(introduced.is_empty(), "{introduced:?}");
     }
 
     #[test]
@@ -2449,15 +2607,16 @@ begin end.
             &mut warnings,
         )
         .unwrap();
+        let assumptions = Assumptions::default();
 
-        let first = fix_dpr_file(&dpr_path, &cache, None).unwrap();
+        let first = fix_dpr_file(&dpr_path, &cache, None, &assumptions).unwrap();
         assert_eq!(first.failures, 0, "{first:?}");
         assert_eq!(first.updated, 1, "{first:?}");
         let updated = fs::read_to_string(&dpr_path).unwrap();
         assert!(updated.contains("UnitB in 'UnitB.pas'"), "{updated}");
         assert!(updated.contains("UnitC in 'UnitC.pas'"), "{updated}");
 
-        let second = fix_dpr_file(&dpr_path, &cache, None).unwrap();
+        let second = fix_dpr_file(&dpr_path, &cache, None, &assumptions).unwrap();
         assert_eq!(second.failures, 0, "{second:?}");
         assert_eq!(second.updated, 0, "{second:?}");
     }
@@ -2489,8 +2648,9 @@ begin end.
         let mut warnings = Vec::new();
         let cache =
             unit_cache::build_unit_cache(std::slice::from_ref(&unit_a), &mut warnings).unwrap();
+        let assumptions = Assumptions::default();
 
-        let result = fix_dpr_file(&dpr_path, &cache, None).unwrap();
+        let result = fix_dpr_file(&dpr_path, &cache, None, &assumptions).unwrap();
         assert_eq!(result.failures, 0, "{result:?}");
         assert_eq!(result.updated, 0, "{result:?}");
         let updated = fs::read_to_string(&dpr_path).unwrap();
@@ -2532,13 +2692,50 @@ begin end.
             unit_cache::build_unit_cache(std::slice::from_ref(&unit_a), &mut warnings).unwrap();
         let delphi_cache =
             unit_cache::build_unit_cache(&[ext_mid, new_unit], &mut warnings).unwrap();
+        let assumptions = Assumptions::default();
 
-        let result = fix_dpr_file(&dpr_path, &project_cache, Some(&delphi_cache)).unwrap();
+        let result =
+            fix_dpr_file(&dpr_path, &project_cache, Some(&delphi_cache), &assumptions).unwrap();
         assert_eq!(result.failures, 0, "{result:?}");
         assert_eq!(result.updated, 1, "{result:?}");
         let updated = fs::read_to_string(&dpr_path).unwrap();
         assert!(updated.contains("ExtMid in "), "{updated}");
         assert!(updated.contains("NewUnit in "), "{updated}");
+    }
+
+    #[test]
+    fn fix_dpr_file_skips_inactive_conditional_roots_when_assumed_off() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let debug_root = root.join("DebugRoot.pas");
+        let new_unit = root.join("NewUnit.pas");
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  {$IFDEF DEBUG} DebugRoot in 'DebugRoot.pas' {$ENDIF};\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &debug_root,
+            "unit DebugRoot;\ninterface\nuses NewUnit;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &new_unit,
+            "unit NewUnit;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let cache =
+            unit_cache::build_unit_cache(&[debug_root.clone(), new_unit], &mut warnings).unwrap();
+        let mut assumptions = Assumptions::default();
+        assumptions.set("DEBUG", conditionals::AssumedValue::Off);
+
+        let result = fix_dpr_file(&dpr_path, &cache, None, &assumptions).unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 0, "{result:?}");
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(!updated.contains("NewUnit in "), "{updated}");
     }
 
     #[test]
@@ -2605,6 +2802,7 @@ begin end.
             None,
             &new_unit,
             true,
+            &Assumptions::default(),
         )
         .unwrap();
         assert_eq!(result.failures, 0, "{result:?}");
@@ -2672,10 +2870,16 @@ begin end.
             &mut warnings,
         )
         .unwrap();
+        let assumptions = Assumptions::default();
 
-        let result =
-            delete_dependency_files(std::slice::from_ref(&dpr_path), &cache, None, "OldUnit")
-                .unwrap();
+        let result = delete_dependency_files(
+            std::slice::from_ref(&dpr_path),
+            &cache,
+            None,
+            "OldUnit",
+            &assumptions,
+        )
+        .unwrap();
         assert_eq!(result.failures, 0, "{result:?}");
         assert_eq!(result.updated, 1, "{result:?}");
 
@@ -2709,12 +2913,79 @@ begin end.
         let mut warnings = Vec::new();
         let cache =
             unit_cache::build_unit_cache(std::slice::from_ref(&keep_unit), &mut warnings).unwrap();
+        let assumptions = Assumptions::default();
 
-        let result =
-            delete_dependency_files(std::slice::from_ref(&dpr_path), &cache, None, "OldUnit")
-                .unwrap();
+        let result = delete_dependency_files(
+            std::slice::from_ref(&dpr_path),
+            &cache,
+            None,
+            "OldUnit",
+            &assumptions,
+        )
+        .unwrap();
         assert_eq!(result.failures, 0, "{result:?}");
         assert_eq!(result.updated, 0, "{result:?}");
+    }
+
+    #[test]
+    fn delete_dependency_files_respects_assume_off_for_cascade() {
+        let root = temp_dir();
+        let dpr_path = root.join("App.dpr");
+        let old_unit = root.join("OldUnit.pas");
+        let maybe_root = root.join("MaybeRoot.pas");
+        let shared_dep = root.join("SharedDep.pas");
+
+        fs::write(
+            &dpr_path,
+            "program App;\nuses\n  OldUnit in 'OldUnit.pas',\n  MaybeRoot in 'MaybeRoot.pas',\n  SharedDep in 'SharedDep.pas';\nbegin\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &old_unit,
+            "unit OldUnit;\ninterface\nuses SharedDep;\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &maybe_root,
+            "unit MaybeRoot;\ninterface\nuses {$IFDEF DEBUG} SharedDep {$ENDIF};\nimplementation\nend.\n",
+        )
+        .unwrap();
+        fs::write(
+            &shared_dep,
+            "unit SharedDep;\ninterface\nimplementation\nend.\n",
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let cache = unit_cache::build_unit_cache(
+            &[old_unit.clone(), maybe_root.clone(), shared_dep.clone()],
+            &mut warnings,
+        )
+        .unwrap();
+        let mut assumptions = Assumptions::default();
+        assumptions.set("DEBUG", conditionals::AssumedValue::Off);
+
+        let result = delete_dependency_files(
+            std::slice::from_ref(&dpr_path),
+            &cache,
+            None,
+            "OldUnit",
+            &assumptions,
+        )
+        .unwrap();
+        assert_eq!(result.failures, 0, "{result:?}");
+        assert_eq!(result.updated, 1, "{result:?}");
+
+        let updated = fs::read_to_string(&dpr_path).unwrap();
+        assert!(!updated.contains("OldUnit in 'OldUnit.pas'"), "{updated}");
+        assert!(
+            !updated.contains("SharedDep in 'SharedDep.pas'"),
+            "{updated}"
+        );
+        assert!(
+            updated.contains("MaybeRoot in 'MaybeRoot.pas'"),
+            "{updated}"
+        );
     }
 
     fn temp_dir() -> PathBuf {

@@ -46,6 +46,9 @@ struct AddDependencyArgs {
     common: SharedArgs,
 
     #[command(flatten)]
+    dependency_lookup: DependencyLookupArgs,
+
+    #[command(flatten)]
     dpr_filter: AddDependencyDprFilterArgs,
 
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
@@ -73,6 +76,9 @@ struct AddDependencyArgs {
 struct InsertDependencyArgs {
     #[command(flatten)]
     common: SharedArgs,
+
+    #[command(flatten)]
+    dependency_lookup: DependencyLookupArgs,
 
     #[command(flatten)]
     dpr_filter: AddDependencyDprFilterArgs,
@@ -103,6 +109,9 @@ struct DeleteDependencyArgs {
     common: SharedArgs,
 
     #[command(flatten)]
+    dependency_lookup: DependencyLookupArgs,
+
+    #[command(flatten)]
     dpr_filter: AddDependencyDprFilterArgs,
 
     #[command(flatten)]
@@ -126,6 +135,9 @@ struct FixDprArgs {
     #[command(flatten)]
     common: SharedArgs,
 
+    #[command(flatten)]
+    dependency_lookup: DependencyLookupArgs,
+
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     delphi_path: Vec<String>,
@@ -143,6 +155,9 @@ struct FixDprArgs {
 struct ListConditionalsArgs {
     #[command(flatten)]
     common: SharedArgs,
+
+    #[command(flatten)]
+    dependency_lookup: DependencyLookupArgs,
 
     /// Optional Delphi/VCL source root path to scan for fallback unit resolution (repeatable)
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
@@ -174,6 +189,13 @@ struct SharedArgs {
     /// Show detailed warnings list
     #[arg(long)]
     show_warnings: bool,
+}
+
+#[derive(Args, Debug, Default)]
+struct DependencyLookupArgs {
+    /// Assume compiler symbol is undefined during dependency traversal (repeatable)
+    #[arg(long, value_name = "SYMBOL", action = clap::ArgAction::Append)]
+    assume_off: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -235,6 +257,11 @@ fn run_add_dependency(args: AddDependencyArgs) {
     delphi_roots = dedupe_paths(delphi_roots);
 
     let mut warnings = Vec::new();
+    let dependency_assumptions =
+        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
+            Ok(value) => value,
+            Err(err) => exit_with_error(err, 2),
+        };
     let new_dependency_path = match resolve_new_dependency_path(&args.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -272,6 +299,10 @@ fn run_add_dependency(args: AddDependencyArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
+    if !assume_off_display.is_empty() {
+        println!("Assuming off: {}", assume_off_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -349,6 +380,7 @@ fn run_add_dependency(args: AddDependencyArgs) {
         delphi_unit_cache.as_mut(),
         &new_unit,
         !args.disable_introduced_dependencies,
+        &dependency_assumptions,
     ) {
         Ok(summary) => summary,
         Err(err) => exit_with_error(err.to_string(), 1),
@@ -365,18 +397,22 @@ fn run_add_dependency(args: AddDependencyArgs) {
         let mut fix_pass_failures = 0usize;
         let updated_paths = dpr_summary.updated_paths.clone();
         for dpr_path in &updated_paths {
-            let fix_summary =
-                match dpr_edit::fix_dpr_file(dpr_path, &unit_cache, delphi_unit_cache.as_ref()) {
-                    Ok(summary) => summary,
-                    Err(err) => {
-                        warnings.push(format!(
-                            "warning: failed to run fix-dpr on {}: {err}",
-                            dpr_path.display()
-                        ));
-                        fix_pass_failures += 1;
-                        continue;
-                    }
-                };
+            let fix_summary = match dpr_edit::fix_dpr_file(
+                dpr_path,
+                &unit_cache,
+                delphi_unit_cache.as_ref(),
+                &dependency_assumptions,
+            ) {
+                Ok(summary) => summary,
+                Err(err) => {
+                    warnings.push(format!(
+                        "warning: failed to run fix-dpr on {}: {err}",
+                        dpr_path.display()
+                    ));
+                    fix_pass_failures += 1;
+                    continue;
+                }
+            };
             fix_pass_scanned += fix_summary.scanned;
             fix_pass_updated += fix_summary.updated;
             fix_pass_failures += fix_summary.failures;
@@ -445,6 +481,11 @@ fn run_fix_dpr(args: FixDprArgs) {
         exit_with_error(err, 2);
     }
     let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
+    let dependency_assumptions =
+        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
+            Ok(value) => value,
+            Err(err) => exit_with_error(err, 2),
+        };
 
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Mode: fix-dpr");
@@ -466,6 +507,10 @@ fn run_fix_dpr(args: FixDprArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
+    if !assume_off_display.is_empty() {
+        println!("Assuming off: {}", assume_off_display);
     }
     let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
         Ok(result) => result,
@@ -518,11 +563,15 @@ fn run_fix_dpr(args: FixDprArgs) {
     };
     println!("Repairing target dpr...");
 
-    let dpr_summary =
-        match dpr_edit::fix_dpr_file(&target_dpr, &unit_cache, delphi_unit_cache.as_ref()) {
-            Ok(summary) => summary,
-            Err(err) => exit_with_error(err.to_string(), 1),
-        };
+    let dpr_summary = match dpr_edit::fix_dpr_file(
+        &target_dpr,
+        &unit_cache,
+        delphi_unit_cache.as_ref(),
+        &dependency_assumptions,
+    ) {
+        Ok(summary) => summary,
+        Err(err) => exit_with_error(err.to_string(), 1),
+    };
     warnings.extend(dpr_summary.warnings.iter().cloned());
 
     print_summary(SummaryOutput {
@@ -575,6 +624,11 @@ fn run_list_conditionals(args: ListConditionalsArgs) {
         exit_with_error(err, 2);
     }
     let target_dpr = unit_cache::canonicalize_if_exists(&target_dpr);
+    let dependency_assumptions =
+        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
+            Ok(value) => value,
+            Err(err) => exit_with_error(err, 2),
+        };
 
     println!("fixdpr {}", env!("CARGO_PKG_VERSION"));
     println!("Mode: list-conditionals");
@@ -596,6 +650,10 @@ fn run_list_conditionals(args: ListConditionalsArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
+    if !assume_off_display.is_empty() {
+        println!("Assuming off: {}", assume_off_display);
     }
 
     let scan = match fs_walk::scan_files(&search_roots, &ignore_matcher) {
@@ -648,12 +706,11 @@ fn run_list_conditionals(args: ListConditionalsArgs) {
     };
 
     println!("Analyzing target dpr conditionals...");
-    let assumptions = conditionals::Assumptions::default();
     let conditional_units = match conditionals::collect_dpr_conditional_units(
         &target_dpr,
         &unit_cache,
         delphi_unit_cache.as_ref(),
-        &assumptions,
+        &dependency_assumptions,
         &mut warnings,
     ) {
         Ok(Some(units)) => units,
@@ -713,6 +770,11 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
     delphi_roots = dedupe_paths(delphi_roots);
 
     let mut warnings = Vec::new();
+    let dependency_assumptions =
+        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
+            Ok(value) => value,
+            Err(err) => exit_with_error(err, 2),
+        };
     let new_dependency_path = match resolve_new_dependency_path(&args.new_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -762,6 +824,10 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
+    if !assume_off_display.is_empty() {
+        println!("Assuming off: {}", assume_off_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -847,6 +913,7 @@ fn run_insert_dependency(args: InsertDependencyArgs) {
         delphi_unit_cache.as_mut(),
         &new_unit,
         !args.disable_introduced_dependencies,
+        &dependency_assumptions,
     ) {
         Ok(summary) => summary,
         Err(err) => exit_with_error(err.to_string(), 1),
@@ -910,6 +977,11 @@ fn run_delete_dependency(args: DeleteDependencyArgs) {
     delphi_roots.append(&mut delphi_roots_from_version);
     delphi_roots = dedupe_paths(delphi_roots);
 
+    let dependency_assumptions =
+        match build_dependency_assumptions(&args.dependency_lookup.assume_off) {
+            Ok(value) => value,
+            Err(err) => exit_with_error(err, 2),
+        };
     let old_dependency_path = match resolve_new_dependency_path(&args.old_dependency, &cwd) {
         Ok(path) => path,
         Err(err) => exit_with_error(err, 2),
@@ -948,6 +1020,10 @@ fn run_delete_dependency(args: DeleteDependencyArgs) {
     let ignore_display = format_values(&args.common.ignore_path);
     if !ignore_display.is_empty() {
         println!("Ignoring: {}", ignore_display);
+    }
+    let assume_off_display = format_values(&args.dependency_lookup.assume_off);
+    if !assume_off_display.is_empty() {
+        println!("Assuming off: {}", assume_off_display);
     }
     let ignore_dpr_display = format_values(ignore_dpr_matcher.normalized_patterns());
     if !ignore_dpr_display.is_empty() {
@@ -1032,6 +1108,7 @@ fn run_delete_dependency(args: DeleteDependencyArgs) {
         &unit_cache,
         delphi_unit_cache.as_ref(),
         &old_unit.name,
+        &dependency_assumptions,
     ) {
         Ok(summary) => summary,
         Err(err) => exit_with_error(err.to_string(), 1),
@@ -1270,6 +1347,20 @@ fn format_values(values: &[String]) -> String {
     entries.join(", ")
 }
 
+fn build_dependency_assumptions(
+    assume_off: &[String],
+) -> Result<conditionals::Assumptions, String> {
+    let mut assumptions = conditionals::Assumptions::default();
+    for symbol in assume_off {
+        let trimmed = symbol.trim();
+        if trimmed.is_empty() {
+            return Err("--assume-off cannot be empty".to_string());
+        }
+        assumptions.set(trimmed, conditionals::AssumedValue::Off);
+    }
+    Ok(assumptions)
+}
+
 fn contains_path(paths: &[PathBuf], target: &Path) -> bool {
     let target_key = normalize_path_key(target);
     paths
@@ -1404,6 +1495,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_add_dependency_with_assume_off() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "add-dependency",
+            "--search-path",
+            ".",
+            "--assume-off",
+            "DEBUG",
+            "./common/NewUnit.pas",
+        ]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
     fn parse_insert_dependency_with_target_path_and_target_dpr() {
         let parsed = Cli::try_parse_from([
             "fixdpr",
@@ -1437,6 +1543,21 @@ mod tests {
     fn parse_fix_dpr_with_positional_dpr_file() {
         let parsed =
             Cli::try_parse_from(["fixdpr", "fix-dpr", "--search-path", ".", "./app1/App1.dpr"]);
+
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn parse_fix_dpr_with_assume_off() {
+        let parsed = Cli::try_parse_from([
+            "fixdpr",
+            "fix-dpr",
+            "--search-path",
+            ".",
+            "--assume-off",
+            "DEBUG",
+            "./app1/App1.dpr",
+        ]);
 
         assert!(parsed.is_ok(), "{parsed:?}");
     }

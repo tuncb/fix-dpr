@@ -60,6 +60,88 @@ fn end_to_end_updates_expected_dprs() {
 }
 
 #[test]
+fn end_to_end_add_dependency_uses_conditional_dependents_by_default() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("assume_off_repo");
+    let expected_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("assume_off_expected_default");
+    let temp_root = temp_dir("fixdpr_e2e_assume_off_default_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("shared").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr add-dependency default conditional lookup");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app").join("App.dpr")).expect("read actual dpr"),
+    );
+    let expected = normalize_newlines(
+        fs::read_to_string(expected_root.join("app").join("App.dpr")).expect("read expected dpr"),
+    );
+    assert_eq!(
+        actual, expected,
+        "conditional dependency should be inserted"
+    );
+}
+
+#[test]
+fn end_to_end_add_dependency_assume_off_skips_conditional_dependents() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests")
+        .join("fixtures")
+        .join("assume_off_repo");
+    let temp_root = temp_dir("fixdpr_e2e_assume_off_disabled_");
+    copy_dir(&fixture_root, &temp_root);
+
+    let new_dependency = temp_root.join("shared").join("NewUnit.pas");
+    let output = Command::new(env!("CARGO_BIN_EXE_fixdpr"))
+        .arg("add-dependency")
+        .arg("--search-path")
+        .arg(&temp_root)
+        .arg("--assume-off")
+        .arg("DEBUG")
+        .arg(&new_dependency)
+        .output()
+        .expect("run fixdpr add-dependency with assume-off");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalize_newlines(
+        fs::read_to_string(temp_root.join("app").join("App.dpr")).expect("read actual dpr"),
+    );
+    let expected = normalize_newlines(
+        fs::read_to_string(fixture_root.join("app").join("App.dpr")).expect("read expected dpr"),
+    );
+    assert_eq!(
+        actual, expected,
+        "assumed-off branch should not trigger insertion"
+    );
+}
+
+#[test]
 fn end_to_end_search_path_can_be_repeated_for_multiple_roots() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_root = repo_root

@@ -12,6 +12,7 @@ use crate::uses_include;
 pub struct UnitFileInfo {
     pub name: String,
     pub path: PathBuf,
+    #[allow(dead_code)]
     pub uses: Vec<String>,
     pub conditional_uses: Vec<ConditionalUse>,
 }
